@@ -1,0 +1,10 @@
+[package]
+name = "unzip-cli"
+description = "自动解压工具命令行（Rust 移植版）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+unzip-core = { path = "../unzip-core" }
+clap = { workspace = true }

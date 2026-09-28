@@ -1,0 +1,14 @@
+本目录组件为「自动解压工具」的内置应急解压层，在目标机器未安装 7-Zip / WinRAR 时使用。
+
+组件清单
+--------
+- 7z.exe / 7z.dll  —— 7-Zip 26.03 (x64)，版权所有 (C) Igor Pavlov
+  许可：GNU LGPL + unRAR 许可限制，全文见 License.txt
+  官方：https://7-zip.org/
+- UnRAR.exe        —— RARLAB 出品的仅解压工具，版权所有 (C) Alexander Roshal
+  许可：UnRAR 许可（允许在仅解压类软件中免费使用与再发布）
+  官方：https://www.rarlab.com/
+- License.txt      —— 7-Zip 许可证（含 unRAR 许可条款）
+
+调用优先级：用户在外部程序设置中配置的 7-Zip / UnRAR 路径优先；
+仅当配置的路径不存在时，才回退到本目录的内置组件。

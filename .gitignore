@@ -1,0 +1,17 @@
+# Rust 构建产物
+/target/
+/app/src-tauri/target/
+
+# 前端依赖与构建产物
+/app/node_modules/
+/app/dist/
+
+# Tauri 生成代码
+/app/src-tauri/gen/
+
+# sync-bundled.bat 同步副本（源文件在 assets/bundled/，打包前跑一次同步脚本）
+/app/src-tauri/resources/bundled/
+
+# 编辑器/系统杂物
+.DS_Store
+Thumbs.db

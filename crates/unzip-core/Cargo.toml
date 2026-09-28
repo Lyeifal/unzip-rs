@@ -1,0 +1,17 @@
+[package]
+name = "unzip-core"
+description = "自动解压核心库：魔数识别、散卷归集、改名卷领养、密码库、lz4 链式解码"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+strsim = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

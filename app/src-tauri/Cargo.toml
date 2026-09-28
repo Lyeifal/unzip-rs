@@ -1,0 +1,19 @@
+[package]
+name = "unzip-app"
+version = "0.1.0"
+edition = "2021"
+description = "自动解压工具（Tauri 外壳，核心逻辑在 unzip-core）"
+license = "MIT"
+
+# 与上级 D:\Code\unzip-rs workspace 隔离，避免被当成员编译。
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = { version = "0.15", default-features = false }
+unzip-core = { path = "../../crates/unzip-core" }
