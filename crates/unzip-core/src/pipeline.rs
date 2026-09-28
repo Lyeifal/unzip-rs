@@ -922,6 +922,90 @@ mod tests {
         assert_eq!(snapshot(&src), before, "源目录文件清单被改变");
     }
 
+    /// 加密 7z 分卷（mhe=on，7z 造）+ 密码库命中 → 组装放行并成功解出。
+    /// 回归：assemble 最终校验固定空密码探针，加密卷曾被误报"分卷组装后校验未通过"。
+    #[test]
+    fn encrypted_7z_volumes_password_in_library() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let game = src.join("游戏A");
+        fs::create_dir_all(&game).unwrap();
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("big.bin"), random_bytes(200 * 1024, 7)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-p123456", "-mhe=on", "-v64k"])
+            .arg(&game.join("e.7z"))
+            .arg("big.bin")
+            .current_dir(work.path()));
+
+        let before = snapshot(&src);
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["wrongpw", "123456"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(
+            out.join("游戏A/big.bin").metadata().unwrap().len(),
+            200 * 1024,
+            "加密 7z 分卷应解出完整 big.bin，日志：{:?}",
+            cb.all()
+        );
+        assert!(summary.failed.is_empty(), "失败列表应为空：{:?}", summary.failed);
+        assert_eq!(snapshot(&src), before, "源目录文件清单被改变");
+    }
+
+    /// 加密 7z 分卷但密码库未命中 → 报错必须是"密码均失败"，
+    /// 不能是 assemble 的"分卷组装后校验未通过"（回归断言）。
+    #[test]
+    fn encrypted_7z_volumes_password_not_in_library() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let game = src.join("游戏A");
+        fs::create_dir_all(&game).unwrap();
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("big.bin"), random_bytes(200 * 1024, 8)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-p123456", "-mhe=on", "-v64k"])
+            .arg(&game.join("e.7z"))
+            .arg("big.bin")
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["nope1", "nope2"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(summary.ok.len(), 0);
+        assert_eq!(summary.failed.len(), 1, "日志：{:?}", cb.all());
+        let reason = &summary.failed[0].1;
+        assert!(
+            reason.contains("密码"),
+            "应报密码尝试失败，而不是误报缺卷：{reason}"
+        );
+        assert!(
+            !reason.contains("分卷组装后校验未通过"),
+            "加密卷被误报为缺卷/损坏：{reason}"
+        );
+    }
+
     /// apk 产物只落位、不解压。
     #[test]
     fn apk_product_placed_not_extracted() {

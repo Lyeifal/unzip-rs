@@ -290,15 +290,15 @@ pub fn assemble_volumes(
         scan.orphans.retain(|x| x != p);
         scan.adopted.push(p.clone());
     }
-    let (ok, _) = test_archive(ex, &first_tmp, is_rar, passwords);
-    (
-        first_tmp,
-        if ok {
-            None
-        } else {
-            Some("分卷组装后校验未通过（可能缺卷或卷内容不对）".to_string())
-        },
-    )
+    let (ok, text) = test_archive(ex, &first_tmp, is_rar, passwords);
+    // 失败若是 "password" 字样，说明卷已齐、只是加密（7z 探针固定空密码 -p，不解密），
+    // 放行交给正式解压按密码库尝试；缺卷/损坏才是真失败（对齐补卷循环的同款判断）。
+    let err = if ok || text.to_lowercase().contains("password") {
+        None
+    } else {
+        Some("分卷组装后校验未通过（可能缺卷或卷内容不对）".to_string())
+    };
+    (first_tmp, err)
 }
 
 /// 独立包解压失败后的拯救：可能是改了名的首卷或散卷（rar 由 unrar 报真实卷名）。
