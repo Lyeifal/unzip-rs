@@ -12,6 +12,7 @@ walkdir = { workspace = true }
 strsim = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

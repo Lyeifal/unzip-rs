@@ -40,8 +40,8 @@ pub struct Extractor {
 }
 
 /// 跑外部工具：stdin 置空、stdout+stderr 合并 lossy、CREATE_NO_WINDOW。
-/// exe 不存在或 spawn 失败返回 None。
-fn run_exe(exe: &Path, tail: &[&str], args: &[String]) -> Option<ProcResult> {
+/// exe 不存在或 spawn 失败返回 None。cwd：指定子进程工作目录（打包场景需要）。
+fn run_exe(exe: &Path, cwd: Option<&Path>, tail: &[&str], args: &[String]) -> Option<ProcResult> {
     if !exe.exists() {
         return None;
     }
@@ -51,6 +51,9 @@ fn run_exe(exe: &Path, tail: &[&str], args: &[String]) -> Option<ProcResult> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -109,12 +112,27 @@ impl Extractor {
     /// 跑 7z（自动附加 -y -bd -sccUTF-8，stdin 置空，CREATE_NO_WINDOW）。
     /// exe 缺失返回 None。
     pub fn run_7z(&self, args: &[String]) -> Option<ProcResult> {
-        run_exe(self.seven_zip.as_deref()?, &["-y", "-bd", "-sccUTF-8"], args)
+        run_exe(self.seven_zip.as_deref()?, None, &["-y", "-bd", "-sccUTF-8"], args)
+    }
+
+    /// 跑 7z 并指定工作目录（打包场景：cd 进暂存目录后打包 "."，保证压缩包根结构）。
+    pub fn run_7z_in(&self, dir: &Path, args: &[String]) -> Option<ProcResult> {
+        run_exe(
+            self.seven_zip.as_deref()?,
+            Some(dir),
+            &["-y", "-bd", "-sccUTF-8"],
+            args,
+        )
+    }
+
+    /// 7z 是否可用（用户配置路径或捆绑回退探测到即为 true）。
+    pub fn has_7z(&self) -> bool {
+        self.seven_zip.is_some()
     }
 
     /// 跑 unrar（自动附加 -y）。
     pub fn run_unrar(&self, args: &[String]) -> Option<ProcResult> {
-        run_exe(self.unrar.as_deref()?, &["-y"], args)
+        run_exe(self.unrar.as_deref()?, None, &["-y"], args)
     }
 
     /// 7z t 按序试密码（空密码在前），命中后正式解压。

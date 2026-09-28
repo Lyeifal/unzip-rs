@@ -11,6 +11,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use unzip_core::config::{load_config_from, save_config_to, Config};
+use unzip_core::pack::{run_pack, PackOptions, PackSummary};
 use unzip_core::types::{LogLevel, RunCallback, Summary};
 
 /// 首启迁移的 Python 版配置位置。
@@ -34,23 +35,26 @@ impl Drop for BusyGuard {
 }
 
 /// 把 core 的日志/进度/取消桥接成 Tauri 事件。
+/// 事件名 = "{prefix}-log" / "{prefix}-progress"：解压 "uz"，打包 "pack"，两页互不串扰。
 struct TauriCallback {
     app: AppHandle,
     cancel: Arc<AtomicBool>,
+    event_prefix: &'static str,
 }
 
 impl RunCallback for TauriCallback {
     fn on_log(&self, msg: &str, level: LogLevel) {
+        let event = format!("{}-log", self.event_prefix);
         let _ = self
             .app
-            .emit("uz-log", json!({ "msg": msg, "level": level.as_str() }));
+            .emit(&event, json!({ "msg": msg, "level": level.as_str() }));
     }
 
     fn on_progress(&self, done: usize, total: usize, name: &str) {
-        let _ = self.app.emit(
-            "uz-progress",
-            json!({ "done": done, "total": total, "name": name }),
-        );
+        let event = format!("{}-progress", self.event_prefix);
+        let _ = self
+            .app
+            .emit(&event, json!({ "done": done, "total": total, "name": name }));
     }
 
     fn should_cancel(&self) -> bool {
@@ -67,6 +71,20 @@ fn summary_payload(s: &Summary) -> Value {
         "ok": pairs(&s.ok),
         "failed": pairs(&s.failed),
         "skipped": pairs(&s.skipped),
+        "warns": s.warns,
+    })
+}
+
+/// PackSummary → JSON：ok 为含密码/产物/大小的对象数组，failed 为二元组数组。
+fn pack_summary_payload(s: &PackSummary) -> Value {
+    json!({
+        "ok": s.ok.iter().map(|r| json!({
+            "name": r.name,
+            "password": r.password,
+            "size_bytes": r.size_bytes,
+            "outputs": r.outputs.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "failed": s.failed.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
         "warns": s.warns,
     })
 }
@@ -130,6 +148,31 @@ async fn pick_file(current: String) -> Option<String> {
 }
 
 #[tauri::command]
+async fn pick_files(current: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dlg = rfd::FileDialog::new();
+        let cur = current.trim();
+        if !cur.is_empty() {
+            let p = PathBuf::from(cur);
+            dlg = if p.is_dir() {
+                dlg.set_directory(p)
+            } else {
+                dlg.set_directory(p.parent().map(|d| d.to_path_buf()).unwrap_or(p))
+            };
+        }
+        dlg.pick_files()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
 fn start_run(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -166,6 +209,7 @@ fn start_run(
         let cb = TauriCallback {
             app: app.clone(),
             cancel,
+            event_prefix: "uz",
         };
         let summary = unzip_core::run(
             &[src],
@@ -185,6 +229,53 @@ fn start_run(
 #[tauri::command]
 fn cancel_run(state: State<'_, AppState>) {
     state.cancel.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn start_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    options: PackOptions,
+    files: Vec<String>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("待打包列表为空".to_string());
+    }
+    let out = options.output_dir.trim();
+    if out.is_empty() || !Path::new(out).is_dir() {
+        return Err("请先选择有效的打包输出目录".to_string());
+    }
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("已有任务正在进行中".to_string());
+    }
+
+    let cfg = load_config_from(&state.config_path);
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for f in &files {
+        let p = PathBuf::from(f);
+        if p.exists() {
+            sources.push(p);
+        }
+    }
+    if sources.is_empty() {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("待打包的文件或目录均不存在".to_string());
+    }
+
+    let busy = state.busy.clone();
+    let cancel = state.cancel.clone();
+    cancel.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _guard = BusyGuard(busy);
+        let cb = TauriCallback {
+            app: app.clone(),
+            cancel,
+            event_prefix: "pack",
+        };
+        let summary = run_pack(&sources, &options, &cfg, &cb);
+        let _ = app.emit("pack-done", pack_summary_payload(&summary));
+    });
+    Ok(())
 }
 
 fn main() {
@@ -210,8 +301,10 @@ fn main() {
             save_config,
             pick_directory,
             pick_file,
+            pick_files,
             start_run,
             cancel_run,
+            start_pack,
         ])
         .run(tauri::generate_context!())
         .expect("运行自动解压工具失败");
