@@ -173,6 +173,28 @@ async fn pick_files(current: String) -> Vec<String> {
 }
 
 #[tauri::command]
+async fn pick_directories_multi(current: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dlg = rfd::FileDialog::new();
+        let cur = current.trim();
+        if !cur.is_empty() {
+            dlg = dlg.set_directory(PathBuf::from(cur));
+        } else if let Some(home) = std::env::var_os("USERPROFILE") {
+            dlg = dlg.set_directory(PathBuf::from(home));
+        }
+        dlg.pick_folders()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
 fn start_run(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -302,6 +324,7 @@ fn main() {
             pick_directory,
             pick_file,
             pick_files,
+            pick_directories_multi,
             start_run,
             cancel_run,
             start_pack,

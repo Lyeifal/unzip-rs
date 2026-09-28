@@ -61,10 +61,13 @@ async function addFiles() {
 }
 
 async function addDir() {
-  const picked = await invoke<string | null>("pick_directory", {
-    current: items.value.length ? items.value[items.value.length - 1] : "",
-  });
-  if (picked && !items.value.includes(picked)) items.value.push(picked);
+  // 一次可多选目录；以列表最后一个条目所在的目录作为对话框起点。
+  const last = items.value[items.value.length - 1];
+  const startDir = last ? last.replace(/[/\\][^/\\]*$/, "") : "";
+  const picked = await invoke<string[]>("pick_directories_multi", { current: startDir });
+  for (const p of picked) {
+    if (!items.value.includes(p)) items.value.push(p);
+  }
 }
 
 function removeItem() {
