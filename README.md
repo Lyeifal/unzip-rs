@@ -141,5 +141,5 @@ sync-bundled.bat && npm run tauri build        # 完整：exe + NSIS 安装包
 
 ## 开源协议与致谢
 
-- 本项目：MIT License（见 LICENSE）
+- 本项目：GNU Affero General Public License v3.0（AGPL-3.0，见 LICENSE），Copyright (C) 2026 Lyeifal
 - 内置应急组件：7-Zip 26.03（LGPL，见 `assets/bundled/License.txt`）、UnRAR（RARLAB，仅解压许可，见 `assets/bundled/NOTICE.txt`），许可证文件随发布包分发
