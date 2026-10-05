@@ -1,6 +1,5 @@
 //! 自动解压工具 — Tauri v2 外壳。
-//! 启动时解析 app_data_dir，设 UNZIP_CONFIG_PATH / UNZIP_BUNDLED_DIR，
-//! 并把 Python 版 D:\Code\unzip\config.json 首启迁移到应用数据目录。
+//! 启动时解析 app_data_dir，设 UNZIP_CONFIG_PATH / UNZIP_BUNDLED_DIR。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -13,9 +12,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use unzip_core::config::{load_config_from, save_config_to, Config};
 use unzip_core::pack::{run_pack, PackOptions, PackSummary};
 use unzip_core::types::{LogLevel, RunCallback, Summary};
-
-/// 首启迁移的 Python 版配置位置。
-const LEGACY_CONFIG: &str = r"D:\Code\unzip\config.json";
 
 struct AppState {
     config_path: PathBuf,
@@ -87,17 +83,6 @@ fn pack_summary_payload(s: &PackSummary) -> Value {
         "failed": s.failed.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
         "warns": s.warns,
     })
-}
-
-/// 首启迁移：目标配置不存在且 Python 版配置存在 → 拷贝。
-fn migrate_config(config_path: &Path) {
-    if config_path.exists() {
-        return;
-    }
-    let legacy = Path::new(LEGACY_CONFIG);
-    if legacy.is_file() {
-        let _ = std::fs::copy(legacy, config_path);
-    }
 }
 
 #[tauri::command]
@@ -310,7 +295,6 @@ fn main() {
             if let Ok(res_dir) = app.path().resource_dir() {
                 std::env::set_var("UNZIP_BUNDLED_DIR", res_dir);
             }
-            migrate_config(&config_path);
             app.manage(AppState {
                 config_path,
                 busy: Arc::new(AtomicBool::new(false)),

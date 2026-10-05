@@ -9,14 +9,17 @@ use crate::config::Config;
 use crate::sniff::{archive_stem, classify_str, parse_volume_name, suffix_with_dot};
 use crate::types::{is_under, normalize, ArchiveKind, Package, PkgKind, ScanResult, VolFamily};
 
-/// 无魔数未知文件的后缀黑名单（对应 Python ORPHAN_BLACKLIST；.json 去重）。
+/// 无魔数未知文件的后缀黑名单（对应 Python ORPHAN_BLACKLIST；.json 去重；
+/// .pdf 为 Rust 版新增：附带广告 PDF 很常见，按普通文件跳过而非「无法识别」告警）。
 const ORPHAN_BLACKLIST: &[&str] = &[
     ".txt", ".md", ".nfo", ".url", ".html", ".htm", ".json", ".log", ".ini",
-    ".lnk", ".bat", ".cmd", ".exe", ".msi", ".dll", ".sys", ".py",
+    ".lnk", ".bat", ".cmd", ".exe", ".msi", ".dll", ".sys", ".py", ".pdf",
 ];
 
-/// 未下载完成的临时文件后缀（对应 Python 里的 endswith 判断）。
-const DOWNLOADING_SUFFIXES: &[&str] = &[".baiduyun.p.downloading", ".downloading", ".download"];
+/// 未下载完成的临时文件后缀（对应 Python 里的 endswith 判断；.qkdownloading
+/// 为 Rust 版新增：夸克网盘下载中的临时文件，避免半成品被当压缩包移入失败目录）。
+const DOWNLOADING_SUFFIXES: &[&str] =
+    &[".baiduyun.p.downloading", ".downloading", ".download", ".qkdownloading"];
 
 fn file_name_string(path: &Path) -> String {
     path.file_name()
@@ -51,6 +54,15 @@ pub fn scan_sources(
             .filter(|p| p.is_file())
             .collect();
 
+        // kinds 备忘：同一文件两遍扫描只嗅探一次（嵌入识别有大窗口 I/O，媒体多的树省一半）
+        let mut kinds: std::collections::HashMap<PathBuf, Option<&'static str>> =
+            std::collections::HashMap::new();
+        let mut kind_of = |f: &Path| -> Option<&'static str> {
+            *kinds
+                .entry(f.to_path_buf())
+                .or_insert_with(|| classify_str(f, &product_exts))
+        };
+
         // 第一遍：只收分卷（idx>1）与首卷（idx==1 且是归档/lz4）。
         // Python 单遍里 stem.rar/stem.zip 的主卷补位依赖枚举顺序；这里先收齐全部
         // 分卷，第二遍再补位，结果与顺序无关（唯一的行为改进，其余逻辑相同）。
@@ -63,7 +75,7 @@ pub fn scan_sources(
             if DOWNLOADING_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
                 continue;
             }
-            let kind = classify_str(f, &product_exts);
+            let kind = kind_of(f);
             if kind == Some("media") || kind == Some("product") {
                 continue;
             }
@@ -95,7 +107,7 @@ pub fn scan_sources(
                 scan.skips.push((f.clone(), "未下载完成的文件".to_string()));
                 continue;
             }
-            let kind = classify_str(f, &product_exts);
+            let kind = kind_of(f);
             if kind == Some("media") {
                 scan.skips
                     .push((f.clone(), "真实图片/视频，不是压缩包".to_string()));
@@ -438,6 +450,48 @@ mod tests {
         let scan = scan_sources(&[root.to_path_buf()], true, &cfg(), None, None);
         assert_eq!(skip_reasons(&scan), vec!["未下载完成的文件"; 2]);
         assert!(scan.archives.is_empty());
+    }
+
+    #[test]
+    fn pdf_is_ordinary_file_and_qkdownloading_skipped() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        // 真 PDF（%PDF 头，无压缩档魔数）→ 普通文件，不产生「无法识别」告警
+        write(root, "ad.pdf", b"%PDF-1.6\r%\xe2\xe3\xcf\xd3\r\n1 0 obj\n<<>>\n");
+        // 夸克下载中的临时文件（有 7z 魔数也不行）→ 未下载完成，不建包
+        write(root, "clip.7z-aaa.001.qkdownloading", SEVENZ_MAGIC);
+
+        let scan = scan_sources(&[root.to_path_buf()], true, &cfg(), None, None);
+        // 顺序无关断言（枚举序随文件系统而变）
+        let reasons = skip_reasons(&scan);
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons.contains(&"普通文件"));
+        assert!(reasons.contains(&"未下载完成的文件"));
+        assert!(scan.archives.is_empty());
+        assert!(scan.orphans.is_empty());
+        assert!(scan.warns.is_empty());
+    }
+
+    #[test]
+    fn pdf_named_disguised_archive_still_extracted() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        // .pdf 黑名单只作用于「无魔数」文件：改后缀伪装包必须照常识别（魔数优先于黑名单）
+        write(root, "head.pdf", RAR_MAGIC);
+        let mut junk = vec![0u8; 33];
+        junk.extend_from_slice(b"Rar!\x1a\x07\x01\x00xx");
+        write(root, "junk.pdf", &junk); // 垃圾前缀 + rar 体，靠嵌入识别
+        write(root, "real.pdf", b"%PDF-1.6\r%\xe2\xe3\xcf\xd3\r\n1 0 obj\n<<>>\n");
+
+        let scan = scan_sources(&[root.to_path_buf()], true, &cfg(), None, None);
+        assert_eq!(scan.archives.len(), 2, "伪装 pdf 必须进归档：{:?}", scan.archives);
+        assert!(
+            scan.archives.iter().all(|(_, k)| *k == PkgKind::Archive(ArchiveKind::Rar)),
+            "两个伪装 pdf 都应是 rar：{:?}",
+            scan.archives
+        );
+        assert_eq!(skip_reasons(&scan), vec!["普通文件"]);
+        assert!(scan.orphans.is_empty());
     }
 
     // ---------- 归档 / 产物 / 递归 ----------

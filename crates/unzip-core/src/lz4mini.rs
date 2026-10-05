@@ -1,4 +1,4 @@
-//! 纯 Rust LZ4 帧解码器（直译自 D:\Code\unzip\lz4mini.py）。
+//! 纯 Rust LZ4 帧解码器（直译自原 Python 版 lz4mini）。
 //! 支持标准帧/legacy 帧（lz4 -l）/块依赖（-BD）/多帧拼接/跳帧/未压缩块；
 //! 不校验 xxhash，解码错误以 Lz4Error 抛出。
 

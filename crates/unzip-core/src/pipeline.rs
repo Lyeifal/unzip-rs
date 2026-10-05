@@ -1,7 +1,7 @@
 //! 解包与主流程：unwrap_folder 递归、lz4 链、extract_package、run()。
 //! （移植自 unzip_core.py 783-1076 行）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,8 +11,8 @@ use crate::assemble::{assemble_volumes, rescue_renamed_first};
 use crate::config::{promote_password, Config};
 use crate::extract::Extractor;
 use crate::scan::{build_packages, scan_sources};
-use crate::sniff::classify;
-use crate::types::{ArchiveKind, LogLevel, Package, PkgKind, RunCallback, ScanResult, Summary};
+use crate::sniff::{classify, parse_volume_name};
+use crate::types::{ArchiveKind, LogLevel, Package, PkgKind, RunCallback, ScanResult, Summary, VolFamily};
 
 fn file_name(p: &Path) -> String {
     p.file_name()
@@ -85,6 +85,101 @@ fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// 把 src 从 offset 到 EOF 雕到 dst（嵌入 zip 复合包：mp4/图片前缀 + 追加压缩档）。
+fn carve_file(src: &Path, offset: u64, dst: &Path) -> std::io::Result<u64> {
+    use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+    let mut f = std::fs::File::open(src)?;
+    f.seek(SeekFrom::Start(offset))?;
+    let mut r = BufReader::with_capacity(8 << 20, f);
+    let o = std::fs::File::create(dst)?;
+    let mut w = BufWriter::with_capacity(8 << 20, o);
+    let n = std::io::copy(&mut r, &mut w)?;
+    w.flush()?;
+    Ok(n)
+}
+
+/// 该包是否为「头魔数与识别 kind 不符」的嵌入复合包，且格式不支持原生偏移 → 返回需雕出的偏移。
+/// rar 7z/unrar 原生支持前缀偏移（实测多形体 jpg+rar 直接可解）；zip/7z/xz 必须雕出；
+/// rar 尾部命中（大媒体后追加到文件尾，原生工具扫不到）同样雕出。
+fn carve_offset(path: &Path, kind: ArchiveKind) -> Option<u64> {
+    match kind {
+        ArchiveKind::Zip | ArchiveKind::SevenZ | ArchiveKind::Xz | ArchiveKind::Rar => {}
+        _ => return None,
+    }
+    if crate::sniff::sniff_head(path) == Some(kind.as_str()) {
+        return None; // 正常文件头
+    }
+    crate::sniff::embedded_offset(path, kind.as_str())
+}
+
+/// 必要时雕出到临时目录，返回 (雕出路径, 保活的临时目录)。
+fn carve_to_temp(src: &Path, kind: ArchiveKind) -> Option<(PathBuf, TempDir)> {
+    let off = carve_offset(src, kind)?;
+    let t = tempfile::Builder::new().prefix(".carve_").tempdir().ok()?;
+    let out = t.path().join("carved.bin");
+    carve_file(src, off, &out).ok()?;
+    Some((out, t))
+}
+
+/// dest 名可去掉的压缩档后缀（用于同名嵌套判定：包名 "PC.rar" 内层目录 "PC" 也算同名）。
+const COLLAPSE_SUFFIXES: &[&str] = &[
+    ".zip", ".rar", ".7z", ".lz4", ".tar", ".gz", ".bz2", ".xz", ".zst",
+    ".tgz", ".tbz2", ".txz",
+];
+
+/// 折叠单一层同名嵌套：dest 里只剩一个目录，且其名等于 dest 名（或 dest 名去压缩后缀，
+/// ASCII 大小写不敏感）→ 内容上移一层。避免 out/X/X 双套同名目录（发布组常把文件夹
+/// 原样打包，包名又取得和文件夹一样）。Python 版不做折叠（Rust 版有意差异）。
+/// 上移中途失败则回滚已移动项、记警告、保持原结构。
+fn collapse_same_name_dir(dest: &Path, cb: &dyn RunCallback) {
+    let base = crate::sniff::ascii_lower(file_name(dest).as_bytes());
+    if base.is_empty() {
+        return;
+    }
+    let stripped = COLLAPSE_SUFFIXES
+        .iter()
+        .find(|s| base.ends_with(s.as_bytes()))
+        .map(|s| &base[..base.len() - s.len()]);
+    let Ok(entries) = fs::read_dir(dest) else {
+        return;
+    };
+    let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    if entries.len() != 1 {
+        return;
+    }
+    let inner = entries[0].path();
+    if !inner.is_dir() {
+        return;
+    }
+    let name = crate::sniff::ascii_lower(file_name(&inner).as_bytes());
+    if name != base && Some(name.as_slice()) != stripped {
+        return;
+    }
+    let Ok(children) = fs::read_dir(&inner) else {
+        return;
+    };
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for c in children.filter_map(|c| c.ok()) {
+        let from = c.path();
+        let to = dest.join(c.file_name());
+        if fs::rename(&from, &to).is_err() {
+            for (f, t) in moved.into_iter().rev() {
+                let _ = fs::rename(t, f);
+            }
+            cb.on_log(
+                &format!(
+                    "[警告] {} 同名目录折叠失败，保持原结构",
+                    file_name(dest)
+                ),
+                LogLevel::Warn,
+            );
+            return;
+        }
+        moved.push((from, to));
+    }
+    let _ = fs::remove_dir(&inner);
+}
+
 fn max_depth_of(cfg: &Config) -> u32 {
     if cfg.max_depth == 0 {
         5
@@ -133,7 +228,192 @@ struct Ctx<'a> {
     cb: &'a dyn RunCallback,
 }
 
+/// 解包阶段子目录浅扫上限：发布组套娃最多「包 → 目录 → 档」两层（fcm 真实案例：
+/// 153…/存档.rar 与 153…/1/1.zip 藏在单层/两层子目录里）；游戏自带的存档备份、
+/// Mod 压缩包藏得更深（实测 Tool/gameSaveBackup/…/xxx_AutoSave.zip 在第 5 层），
+/// 浅扫两层既解开发布组套娃，又不碰游戏数据包（过度解压）。
+const UNWRAP_WALK_MAX: u32 = 2;
+
+/// 一个目录层面的解包作业：规范命名分卷族（只解首卷，成功后整族删除）+ 独立压缩档。
+struct LevelJobs {
+    families: Vec<(PathBuf, Vec<PathBuf>)>, // (首卷, 全族文件)
+    archives: Vec<(PathBuf, PkgKind)>,
+}
+
+fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && !file_name(p).starts_with('.'))
+        .collect()
+}
+
+/// 归组一个目录层面的分卷族与可解压缩档（产物/媒体/普通文件不收集）。
+/// 无魔数的分卷（.7z.002 等）classify 是 None，但已被族覆盖。
+fn collect_level(dir: &Path, exts: &[String]) -> LevelJobs {
+    let mut jobs = LevelJobs {
+        families: Vec::new(),
+        archives: Vec::new(),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return jobs;
+    };
+    let files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+
+    // 归组分卷：按 (族, stem) 收集 idx。有首卷在场的族按族处理（否则卷文件走常规逻辑）。
+    let mut vol_groups: std::collections::HashMap<(VolFamily, String), Vec<(u32, PathBuf)>> =
+        std::collections::HashMap::new();
+    for f in &files {
+        let lower = String::from_utf8_lossy(&crate::sniff::ascii_lower(
+            file_name(f).as_bytes(),
+        ))
+        .into_owned();
+        if let Some(v) = parse_volume_name(&lower) {
+            vol_groups
+                .entry((v.family, v.stem))
+                .or_default()
+                .push((v.idx, (*f).clone()));
+        }
+    }
+    let mut covered: HashSet<PathBuf> = HashSet::new();
+    for (_, mut members) in vol_groups {
+        members.sort_by_key(|(idx, _)| *idx);
+        if members.first().is_some_and(|(idx, _)| *idx == 1) {
+            let first = members[0].1.clone();
+            let all: Vec<PathBuf> = members.into_iter().map(|(_, p)| p).collect();
+            covered.extend(all.iter().cloned()); // 整族（含首卷）由族作业统一解
+            jobs.families.push((first, all));
+        }
+    }
+
+    // 剩余文件逐一分类；族成员视为已覆盖。
+    for f in &files {
+        if covered.contains(f) {
+            continue;
+        }
+        if let Some(kind) = classify(f, exts) {
+            if kind.is_sevenz_kind() || kind == PkgKind::Lz4 {
+                jobs.archives.push(((*f).clone(), kind));
+            }
+        }
+    }
+    jobs
+}
+
+/// 执行一层解包作业到 `into` 目录，返回是否有进展（无进展不递归，失败档留原地并告警）。
+fn run_level(
+    into: &Path,
+    jobs: &LevelJobs,
+    ex: &Extractor,
+    cfg: &Config,
+    passwords: &[String],
+    ctx: &Ctx,
+) -> bool {
+    let exts: Vec<String> = cfg.product_exts.iter().map(|e| e.to_lowercase()).collect();
+    let mut progressed = false;
+
+    // 1) 分卷族：只解首卷，成功后整族删除。不挪暂存位——多卷读取依赖同目录兄弟卷。
+    for (first, all) in &jobs.families {
+        let kind = classify(first, &exts);
+        let err = match kind {
+            Some(PkgKind::Archive(ak)) => {
+                let carved = carve_to_temp(first, ak);
+                let (src, _keep) = carved
+                    .map(|(p, t)| (p, Some(t)))
+                    .unwrap_or_else(|| (first.clone(), None));
+                match ex.extract_archive(&src, into, passwords, ak) {
+                    Ok(_) => None,
+                    Err(e) => Some(e),
+                }
+            }
+            _ => Some(String::new()),
+        };
+        if err.is_none() {
+            for p in all {
+                let _ = fs::remove_file(p);
+            }
+            progressed = true;
+        } else if let Some(e) = err {
+            ctx.cb.on_log(
+                &format!("[警告] 内层 {} 解压失败：{e}", file_name(first)),
+                LogLevel::Warn,
+            );
+        }
+    }
+
+    // 2) 独立压缩档。先挪进隐藏暂存位再解：腾出「档名同名目录」的名字——
+    // B3 真实案例：内层档 B3（无扩展名 rar）内含 B3/ 目录，不挪开时 7z 建目录报
+    // 「当文件已存在时，无法创建该文件」，内层失败但外层仍报成功（假成功）。
+    // 成功：暂存位随 TempDir 删除；失败：挪回原位并告警。
+    for (f, kind) in &jobs.archives {
+        let stage = tempfile::Builder::new()
+            .prefix(".unwrap_")
+            .tempdir_in(into)
+            .ok();
+        let mut staged_src: Option<PathBuf> = None;
+        let src = match &stage {
+            Some(s) => {
+                let sp = s.path().join(file_name(f));
+                if fs::rename(f, &sp).is_ok() {
+                    staged_src = Some(sp.clone());
+                    sp
+                } else {
+                    f.clone()
+                }
+            }
+            None => f.clone(),
+        };
+        let err = match kind {
+            // Python 先走 extract_archive（7z 必失败）再进 _unwrap_lz4，结果等价。
+            PkgKind::Lz4 => unwrap_lz4(&src, into, ex, cfg, passwords),
+            PkgKind::Archive(ak) => {
+                let carved = carve_to_temp(&src, *ak);
+                let (real_src, _keep) = carved
+                    .map(|(p, t)| (p, Some(t)))
+                    .unwrap_or_else(|| (src.clone(), None));
+                match ex.extract_archive(&real_src, into, passwords, *ak) {
+                    Ok(_) => None,
+                    Err(e) => Some(e),
+                }
+            }
+            PkgKind::Product => Some(String::new()),
+        };
+        match err {
+            None => {
+                // 成功：源档清除（未挪动的显式删；已挪动的随 TempDir drop 删除）。
+                if staged_src.is_none() {
+                    let _ = fs::remove_file(f);
+                }
+                progressed = true;
+            }
+            Some(e) => {
+                // 挪回原位（TempDir drop 只会清掉空暂存目录）
+                if let Some(sp) = &staged_src {
+                    let _ = fs::rename(sp, f);
+                }
+                ctx.cb.on_log(
+                    &format!("[警告] 内层 {} 解压失败：{e}", file_name(f)),
+                    LogLevel::Warn,
+                );
+            }
+        }
+    }
+    progressed
+}
+
 /// 文件夹里只有压缩包（无实质内容/子目录/产物）→ 继续解到同一夹，直到露出内容。
+/// 规范命名的分卷族（x.7z.001+N）按族处理：只解首卷（7z/unrar 原生多卷），成功后整族删除。
+///
+/// 本层无可解对象时浅扫子目录两层（UNWRAP_WALK_MAX）：发布组常把内层档藏在
+/// 「包/目录/档」里（fcm 型）；更深的目录不碰——游戏自带的存档备份/Mod 压缩包
+/// 通常在第 3 层以下（实测第 5 层），解它们就是过度解压。
 fn unwrap_folder(
     dest: &Path,
     ex: &Extractor,
@@ -146,49 +426,60 @@ fn unwrap_folder(
     if depth >= max_depth {
         return;
     }
-    let Ok(entries) = fs::read_dir(dest) else {
-        return;
-    };
-    let entries: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    let dirs: Vec<&PathBuf> = entries.iter().filter(|p| p.is_dir()).collect();
-    let files: Vec<&PathBuf> = entries.iter().filter(|p| p.is_file()).collect();
     let exts: Vec<String> = cfg.product_exts.iter().map(|e| e.to_lowercase()).collect();
-    let mut archives: Vec<(PathBuf, PkgKind)> = Vec::new();
-    for f in &files {
-        if let Some(kind) = classify(f, &exts) {
-            if kind.is_sevenz_kind() || kind == PkgKind::Lz4 {
-                archives.push(((*f).clone(), kind));
+    let jobs = collect_level(dest, &exts);
+
+    if jobs.families.is_empty() && jobs.archives.is_empty() {
+        // 浅扫子目录两层，收集各层作业
+        let mut sub_jobs: Vec<(PathBuf, LevelJobs)> = Vec::new();
+        let mut frontier: Vec<(PathBuf, u32)> =
+            child_dirs(dest).into_iter().map(|d| (d, 1)).collect();
+        while let Some((d, dist)) = frontier.pop() {
+            let j = collect_level(&d, &exts);
+            let has = !j.families.is_empty() || !j.archives.is_empty();
+            if has {
+                sub_jobs.push((d.clone(), j));
+            }
+            if dist < UNWRAP_WALK_MAX {
+                for sd in child_dirs(&d) {
+                    frontier.push((sd, dist + 1));
+                }
             }
         }
-    }
-    if !dirs.is_empty() || archives.len() != files.len() || archives.is_empty() {
+        if sub_jobs.is_empty() {
+            return;
+        }
+        ctx.cb.on_log(
+            &format!("[解包] {} 内仍是压缩包，继续解包…", file_name(dest)),
+            LogLevel::Info,
+        );
+        let mut progressed = false;
+        for (d, j) in &sub_jobs {
+            if run_level(d, j, ex, cfg, passwords, ctx) {
+                progressed = true;
+            }
+            collapse_same_name_dir(d, ctx.cb);
+        }
+        // 无进展不递归：失败的压缩包留着原样，避免同密码逐层重试（子进程风暴）
+        if progressed {
+            unwrap_folder(dest, ex, cfg, passwords, ctx, depth + 1, max_depth);
+        }
         return;
     }
+
+    // 只要有可解对象（独立压缩档或分卷族）就继续解包——目录里混有已解出的
+    // 子目录、产物、readme 等杂项也不放弃。Python 版 `if dirs or ...` 直接
+    // return，真实发布组结构「加密 game.7z + 全CG存档/」会因此把游戏包残留
+    // 在输出里（用户实测踩坑），属有意差异。失败包留原地并告警，无进展不递归。
     ctx.cb.on_log(
         &format!("[解包] {} 内仍是压缩包，继续解包…", file_name(dest)),
         LogLevel::Info,
     );
-    for (f, kind) in &archives {
-        let err = match kind {
-            // Python 先走 extract_archive（7z 必失败）再进 _unwrap_lz4，结果等价。
-            PkgKind::Lz4 => unwrap_lz4(f, dest, ex, cfg, passwords),
-            PkgKind::Archive(ak) => match ex.extract_archive(f, dest, passwords, *ak) {
-                Ok(_) => None,
-                Err(e) => {
-                    ctx.cb.on_log(
-                        &format!("[警告] 内层 {} 解压失败：{e}", file_name(f)),
-                        LogLevel::Warn,
-                    );
-                    Some(e)
-                }
-            },
-            PkgKind::Product => Some(String::new()),
-        };
-        if err.is_none() {
-            let _ = fs::remove_file(f);
-        }
+    let progressed = run_level(dest, &jobs, ex, cfg, passwords, ctx);
+    collapse_same_name_dir(dest, ctx.cb);
+    if progressed {
+        unwrap_folder(dest, ex, cfg, passwords, ctx, depth + 1, max_depth);
     }
-    unwrap_folder(dest, ex, cfg, passwords, ctx, depth + 1, max_depth);
 }
 
 /// 解一个内层 lz4：解码到临时文件；内层是压缩档解到 dest/{stem}/；
@@ -328,9 +619,11 @@ fn extract_package(
         .dest_base
         .clone()
         .unwrap_or_else(|| ctx.out_root.join(&pkg.name));
-    let dest = unique_dir(&dest_base);
 
     if pkg.kind == PkgKind::Product {
+        // 产物：落位是「目录 + unique_target 文件名」，已防撞名；目录直接复用 dest_base，
+        // 不走 unique_dir（避免与同组同名压缩档的输出目录互相挤成 (2)）
+        let dest = dest_base;
         if dry_run {
             ctx.cb.on_log(
                 &format!("[预演] 产物 {} → {}", file_name(&pkg.first), dest.display()),
@@ -376,6 +669,7 @@ fn extract_package(
             }
         }
     } else {
+        let dest = unique_dir(&dest_base);
         if dry_run {
             let vol = if pkg.volumes.is_empty() {
                 String::new()
@@ -407,7 +701,14 @@ fn extract_package(
         let mut first = pkg.first.clone();
         let mut err: Option<String> = None;
         let mut pw: Option<String> = None;
-        let pw_list = order_passwords(pkg, cfg);
+        // 本包完整密码序列：规则+库，并合并运行时密码（CLI --password 追加）。
+        // lz4 链、正式解压、内层解包共用同一份，层间行为一致（Python 内层只看运行时密码，有意差异）。
+        let mut pw_list = order_passwords(pkg, cfg);
+        for p in ctx.passwords {
+            if !pw_list.contains(p) {
+                pw_list.push(p.clone());
+            }
+        }
         if pkg.kind == PkgKind::Lz4 {
             err = lz4_pipeline(&pkg.first, &dest, ex, cfg, ctx, &mut tmp_dirs, &pw_list);
         } else {
@@ -437,7 +738,16 @@ fn extract_package(
                     PkgKind::Archive(k) => k,
                     _ => ArchiveKind::Zip,
                 };
-                match ex.extract_archive(&first, &dest, &pw_list, kind) {
+                // 嵌入复合包（mp4/图片前缀 + 追加 zip/7z/xz）：7z 对带前缀的 zip/7z/xz
+                // 不做偏移校正，雕出纯压缩档再解；rar 原生支持前缀，不雕
+                let extract_src = match carve_to_temp(&first, kind) {
+                    Some((p, t)) => {
+                        tmp_dirs.push(t);
+                        p
+                    }
+                    None => first.clone(),
+                };
+                match ex.extract_archive(&extract_src, &dest, &pw_list, kind) {
                     Ok(p) => pw = p,
                     Err(e) => err = Some(e),
                 }
@@ -473,15 +783,9 @@ fn extract_package(
             return false;
         }
 
-        unwrap_folder(
-            &dest,
-            ex,
-            cfg,
-            ctx.passwords,
-            ctx,
-            0,
-            max_depth_of(cfg),
-        );
+        // 同名嵌套折叠（out/X/X → out/X）后再递归解包，让 unwrap 看到真实内容
+        collapse_same_name_dir(&dest, ctx.cb);
+        unwrap_folder(&dest, ex, cfg, &pw_list, ctx, 0, max_depth_of(cfg));
         if pw.is_some() && cfg.password_strategy == "recent_first" {
             promote_password(cfg, pw.as_deref().unwrap());
         }
@@ -507,12 +811,38 @@ fn is_adopted(pkg: &Package, scan: &ScanResult) -> bool {
     pkg.volumes.values().any(|v| scan.adopted.contains(v))
 }
 
-/// 与 pkg 同组且尚未被领养（仍算独立包）的数量。
+/// ASCII 小写（多字节序列原样通过，只折 A-Z；Windows 路径语义一致）。
+fn ascii_lc(s: &str) -> String {
+    String::from_utf8_lossy(&crate::sniff::ascii_lower(s.as_bytes())).into_owned()
+}
+
+/// 去重键：组 + 包名 + 首卷所在子路径，ASCII 折叠（Windows 目录大小写不敏感；
+/// 不同子目录下的同名包是不同版本，不算重复）。产物（复制落位，不是解压）不参与去重。
+/// None = 永不与别的包去重。
+fn dedup_key(pkg: &Package) -> Option<(String, String, String)> {
+    if pkg.kind == PkgKind::Product {
+        return None;
+    }
+    let parent = pkg
+        .rel
+        .parent()
+        .map(|p| ascii_lc(&p.to_string_lossy()))
+        .unwrap_or_default();
+    Some((ascii_lc(&pkg.group_key()), ascii_lc(&pkg.name), parent))
+}
+
+/// 与 pkg 同组且会实际产出的包数：未领养、去重集只算一份（首个成功/失败兜底都恰好产出一份），
+/// 产物逐个计数。决定 dest 落位 out/<组>/<名> 还是 out/<组>。
 fn alive_count(pkgs: &[Package], pkg: &Package, scan: &ScanResult) -> usize {
     let key = pkg.group_key();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
     pkgs.iter()
         .filter(|q| q.group_key() == key)
         .filter(|q| !is_adopted(q, scan))
+        .filter(|q| match dedup_key(q) {
+            Some(k) => seen.insert(k),
+            None => true,
+        })
         .count()
 }
 
@@ -541,15 +871,23 @@ pub fn run(
     }
     let mut pkgs = build_packages(&mut scan, source_roots);
 
-    // 预组装：卷族包先归集/领养孤儿（其结果决定分组存活计数与目标目录）
+    // 预组装：卷族包先归集/领养孤儿（其结果决定分组存活计数与目标目录）。
+    // 去重跳过的卷族不做预组装：白白烧组装子进程，还会把改名孤儿领养进 scan.adopted
+    // 从此静默（它们的主人永远不会解压）；首个若失败，主循环内联组装兜底。
     let mut pre: HashMap<usize, (PathBuf, Option<TempDir>, Option<String>)> = HashMap::new();
     if !dry_run {
+        let mut seen_pre: HashSet<(String, String, String)> = HashSet::new();
         for (i, pkg) in pkgs.iter().enumerate() {
             if cb.should_cancel() {
                 break;
             }
             if is_adopted(pkg, &scan) || pkg.vol_family.is_none() {
                 continue;
+            }
+            if let Some(k) = dedup_key(pkg) {
+                if !seen_pre.insert(k) {
+                    continue;
+                }
             }
             let Ok(tmp) = tempfile::Builder::new()
                 .prefix(".assemble_")
@@ -574,6 +912,7 @@ pub fn run(
     );
 
     let total = pkgs.len();
+    let mut seen_names: HashSet<(String, String, String)> = HashSet::new();
     for i in 0..total {
         if cb.should_cancel() {
             summary.warns.push("用户取消".to_string());
@@ -581,13 +920,24 @@ pub fn run(
             break;
         }
         if is_adopted(&pkgs[i], &scan) {
+            let skip_name = file_name(&pkgs[i].first);
             cb.on_log(
-                &format!(
-                    "[跳过] {}  —  已作为分卷并入其他压缩包",
-                    file_name(&pkgs[i].first)
-                ),
+                &format!("[跳过] {skip_name}  —  已作为分卷并入其他压缩包"),
                 LogLevel::Skip,
             );
+            cb.on_progress(i + 1, total, &skip_name);
+            continue;
+        }
+        // 同组同名去重：a.zip + a.rar 这类同 stem 双格式只解第一个，
+        // 避免同一内容解出 out/a/a 与 out/a/a (2) 两份（源文件不动；Python 版两份都解，有意差异）。
+        // 只在首个包成功后才登记：首个若解压失败，允许后续同名格式兜底重试。
+        let dedup_key = dedup_key(&pkgs[i]);
+        if !dry_run && dedup_key.as_ref().is_some_and(|k| seen_names.contains(k)) {
+            let name = file_name(&pkgs[i].first);
+            let reason = "同组同名包已处理，疑似重复格式，已跳过".to_string();
+            summary.skipped.push((name.clone(), reason.clone()));
+            cb.on_log(&format!("[跳过] {name}  —  {reason}"), LogLevel::Skip);
+            cb.on_progress(i + 1, total, &name);
             continue;
         }
         let alive = alive_count(&pkgs, &pkgs[i], &scan);
@@ -611,7 +961,7 @@ pub fn run(
             failed_root: failed_root.map(|p| p.to_path_buf()),
             cb,
         };
-        extract_package(
+        let ok = extract_package(
             &ex,
             &pkgs[i],
             &mut cfg,
@@ -621,6 +971,11 @@ pub fn run(
             dry_run,
             pre.remove(&i),
         );
+        if ok && !dry_run {
+            if let Some(k) = dedup_key {
+                seen_names.insert(k);
+            }
+        }
         cb.on_progress(i + 1, total, &name);
     }
 
@@ -883,10 +1238,587 @@ mod tests {
         }
     }
 
+    /// 包内单一顶层目录与包同名（发布组原样打包文件夹）→ 折叠成一层，不再 out/X/X。
+    #[test]
+    fn nested_same_name_top_dir_collapsed() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("game")).unwrap();
+        fs::write(work.path().join("game/game.txt"), "play").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("game.zip"))
+            .arg("game")
+            .current_dir(work.path()));
+
+        run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &Collect::new(),
+            false,
+            true,
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("game/game.txt")).unwrap(),
+            "play",
+            "同名顶层目录应折叠为一层"
+        );
+        assert!(!out.join("game/game").exists(), "不允许残留 out/game/game");
+    }
+
+    /// 外层 zip 内是加密 zip（密码只在配置库）→ 解包阶段用密码库命中并解出。
+    /// 回归：Python 版 unwrap 只看运行时密码，GUI 下内层加密档必失败（Rust 有意差异）。
+    #[test]
+    fn encrypted_inner_archive_unwrapped_with_library_password() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("inner.txt"), "内层机密").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip", "-pinnerpw"])
+            .arg("inner.zip")
+            .arg("inner.txt")
+            .current_dir(work.path()));
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("outer.zip"))
+            .arg("inner.zip")
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["innerpw"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("outer/inner.txt")).unwrap(),
+            "内层机密",
+            "内层加密 zip 应靠密码库解出，日志：{:?}",
+            cb.all()
+        );
+        assert!(
+            !out.join("outer/inner.zip").exists(),
+            "内层压缩包解后应删除"
+        );
+    }
+
+    /// 外层包内「加密游戏.7z + 已解出的目录 + readme 杂项」混装时仍要继续解包
+    /// （Python 版因目录存在直接放弃内层解包，LABYRINTHOS v1.031 真实案例）。
+    #[test]
+    fn inner_archive_alongside_dirs_and_stray_files_still_unwrapped() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        // 内层：7z 格式 + 加密头（-mhe=on），贴近发布组游戏包
+        fs::write(work.path().join("game.bin"), random_bytes(4096, 7)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-p2233", "-mhe=on"])
+            .arg("game.7z")
+            .arg("game.bin")
+            .current_dir(work.path()));
+        // 外层：内层包 + 目录 + 杂项文本（等价「LABYRINTHOS v1.031.7z + 全CG存档/」）
+        fs::create_dir(work.path().join("saves")).unwrap();
+        fs::write(work.path().join("saves/save.dat"), "存档").unwrap();
+        fs::write(work.path().join("readme.txt"), "说明").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("outer.zip"))
+            .args(["game.7z", "saves", "readme.txt"])
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["2233"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(
+            fs::read(out.join("outer/game.bin")).unwrap(),
+            random_bytes(4096, 7),
+            "混装目录+杂项时内层加密 7z 仍应解出，日志：{:?}",
+            cb.all()
+        );
+        assert!(
+            !out.join("outer/game.7z").exists(),
+            "内层压缩包解后应删除"
+        );
+        // 目录与杂项原样保留
+        assert_eq!(
+            fs::read_to_string(out.join("outer/saves/save.dat")).unwrap(),
+            "存档"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("outer/readme.txt")).unwrap(),
+            "说明"
+        );
+    }
+
+    /// jpg+rar 多形体（真封面图 + 追加的加密 rar）在解包阶段被识别并解出（用户真实场景）。
+    #[test]
+    fn polyglot_cover_image_unwrapped() {
+        if !have_tools(&[SEVENZ, RAR]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("GAME")).unwrap();
+        fs::write(work.path().join("GAME/secret.txt"), "多形体内容").unwrap();
+        sh(Command::new(RAR)
+            .args(["a", "-r", "-ptfix0077", "-ep1"])
+            .arg("inner.rar")
+            .arg("GAME")
+            .current_dir(work.path()));
+        // 最小 JPEG 头 + EOI，后接 rar 主体
+        let mut poly = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10];
+        poly.extend_from_slice(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00");
+        poly.extend_from_slice(b"\xff\xd9");
+        poly.extend_from_slice(&fs::read(work.path().join("inner.rar")).unwrap());
+        fs::write(work.path().join("PC15732.jpg"), &poly).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z"])
+            .arg(&src.join("pack.zip"))
+            .arg("PC15732.jpg")
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["tfix0077"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("pack/GAME/secret.txt")).unwrap(),
+            "多形体内容",
+            "jpg+rar 多形体应被识别并解出，日志：{:?}",
+            cb.all()
+        );
+        assert!(!out.join("pack/PC15732.jpg").exists());
+        assert!(
+            summary_failed_empty(&failed),
+            "失败目录不应有内容"
+        );
+    }
+
+    /// 同组同名双格式（a.zip + a.rar）只解第一个，第二个跳过且源文件不动。
+    #[test]
+    fn same_stem_dual_format_extracted_once() {
+        if !have_tools(&[SEVENZ, RAR]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("shared")).unwrap();
+        fs::write(work.path().join("shared/s.txt"), "dup").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("a.zip"))
+            .arg("shared")
+            .current_dir(work.path()));
+        sh(Command::new(RAR)
+            .args(["a", "-r", "-ep1"])
+            .arg(&src.join("a.rar"))
+            .arg("shared")
+            .current_dir(work.path()));
+
+        let before = snapshot(&src);
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(summary.ok.len(), 1, "同 stem 双格式只解一个：{:?}", cb.all());
+        assert!(
+            summary
+                .skipped
+                .iter()
+                .any(|(_, r)| r == "同组同名包已处理，疑似重复格式，已跳过"),
+            "跳过原因缺失：{:?}",
+            summary.skipped
+        );
+        assert_eq!(snapshot(&src), before, "源文件必须保持不动");
+        let stray: Vec<_> = fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("(2)"))
+            .collect();
+        assert!(stray.is_empty(), "不应出现 (2) 双份目录：{stray:?}");
+    }
+
+    /// mp4 皮 + 加密 zip（内含 7z.001/.002 分卷）：游戏分享复合包全链路。
+    /// 回归：7z 打不开带 mp4 前缀的 zip，必须雕出后再解（game.mp4 真实场景）。
+    #[test]
+    fn mp4_prefixed_zip_with_inner_7z_volumes_full_chain() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("big.bin"), random_bytes(256 * 1024, 99)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-v128k"])
+            .arg("g.7z")
+            .arg("big.bin")
+            .current_dir(work.path()));
+        // 全部分卷（含末尾小尾巴卷）打进加密 zip
+        let vols: Vec<std::ffi::OsString> = fs::read_dir(work.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with("g.7z."))
+            .collect();
+        assert!(vols.len() >= 2);
+        let mut zcmd = Command::new(SEVENZ);
+        zcmd
+            .args(["a", "-tzip", "-ptfixxiaoma"])
+            .arg("payload.zip")
+            .args(&vols)
+            .current_dir(work.path());
+        sh(&mut zcmd);
+        // mp4 头桩 + 追加 zip（zip 内部偏移为 zip 相对，模拟真实复合包）
+        let mut stub: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
+            0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2', b'a', b'v', b'c', b'1',
+            b'm', b'p', b'4', b'1',
+        ];
+        stub.extend_from_slice(&[0u8; 64]);
+        let mut poly = stub;
+        poly.extend_from_slice(&fs::read(work.path().join("payload.zip")).unwrap());
+        fs::write(src.join("game.mp4"), &poly).unwrap();
+
+        let before = snapshot(&src);
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&["tfixxiaoma"]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "复合包全链路不应失败：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        if !out.join("game/big.bin").exists() {
+            let tree: Vec<String> = walkdir::WalkDir::new(&out)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().to_string_lossy().into_owned())
+                .collect();
+            panic!("big.bin 缺失，输出树：{tree:?} 日志：{:?}", cb.all());
+        }
+        assert_eq!(
+            out.join("game/big.bin").metadata().unwrap().len(),
+            256 * 1024,
+            "mp4 皮 + zip + 7z 分卷应解出 big.bin，日志：{:?}",
+            cb.all()
+        );
+        assert!(
+            cb.contains("[解包]"),
+            "应触发解包（zip → 分卷 → 内容）：{:?}",
+            cb.all()
+        );
+        assert_eq!(snapshot(&src), before, "源目录文件清单被改变");
+        // 临时雕出目录清理干净
+        let stray: Vec<String> = fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        assert!(stray.is_empty(), "输出目录残留临时目录：{stray:?}");
+    }
+
+    /// 首卷带「删」尾标（用户真实场景：深渊迷宮.7z.001删 + .002 + .003）→ 归族解压。
+    #[test]
+    fn renamed_first_volume_with_marker_reunited() {        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let game = src.join("深渊的迷宫");
+        fs::create_dir_all(&game).unwrap();
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("maze.bin"), random_bytes(200 * 1024, 7)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-v64k"])
+            .arg("深渊迷宮.7z")
+            .arg("maze.bin")
+            .current_dir(work.path()));
+        // 全部分卷移入源目录；首卷带「删」尾标（用户真实场景）
+        let mut vols: Vec<PathBuf> = fs::read_dir(work.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("深渊迷宮.7z.")))
+            .collect();
+        vols.sort();
+        assert!(vols.len() >= 3);
+        for (i, v) in vols.iter().enumerate() {
+            let name = if i == 0 {
+                format!("{}删", v.file_name().unwrap().to_string_lossy()) // 无点号：001删
+            } else {
+                v.file_name().unwrap().to_string_lossy().into_owned()
+            };
+            fs::rename(v, game.join(name)).unwrap();
+        }
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "带尾标首卷应归族成功：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        assert_eq!(
+            out.join("深渊的迷宫/maze.bin").metadata().unwrap().len(),
+            200 * 1024,
+            "应解出完整 maze.bin，日志：{:?}",
+            cb.all()
+        );
+    }
+
+    /// 夸克分段兜底：单档 7z 被下载器按任意字节切成 x.7z.001/.002/.003（非原生卷边界），
+    /// 规范名归集后多卷打不开 → 按序拼接成单档解开。
+    #[test]
+    fn quark_byte_segmented_single_archive_concat_fallback() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("seg.bin"), random_bytes(300 * 1024, 5)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z"])
+            .arg("q.7z")
+            .arg("seg.bin")
+            .current_dir(work.path()));
+        // 任意字节切三段（1/3、2/3 处），冒充分卷名
+        let data = fs::read(work.path().join("q.7z")).unwrap();
+        let cut1 = data.len() / 3;
+        let cut2 = data.len() * 2 / 3;
+        fs::write(src.join("q.7z.001"), &data[..cut1]).unwrap();
+        fs::write(src.join("q.7z.002"), &data[cut1..cut2]).unwrap();
+        fs::write(src.join("q.7z.003"), &data[cut2..]).unwrap();
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "任意字节分段应拼接兜底成功：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        assert_eq!(
+            out.join("q/seg.bin").metadata().unwrap().len(),
+            300 * 1024,
+            "应解出完整 seg.bin，日志：{:?}",
+            cb.all()
+        );
+    }
+
+    fn summary_failed_empty(failed: &Path) -> bool {
+        !failed.exists() || fs::read_dir(failed).map(|mut d| d.next().is_none()).unwrap_or(false)
+    }
+
+    /// 不同子目录下的同名包是不同版本，不去重（finding：去重键必须含子路径）。
+    #[test]
+    fn same_name_in_different_subdirs_both_extracted() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        for sub in ["v1.0", "v1.1"] {
+            fs::create_dir_all(src.join(sub)).unwrap();
+            fs::write(work.path().join("p.txt"), format!("内容{sub}")).unwrap();
+            sh(Command::new(SEVENZ)
+                .args(["a", "-tzip"])
+                .arg(src.join(sub).join("patch.zip"))
+                .arg("p.txt")
+                .current_dir(work.path()));
+        }
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert_eq!(summary.ok.len(), 2, "不同子目录同名包都应解压：{:?}", cb.all());
+        assert_eq!(
+            fs::read_to_string(out.join("v1.0/p.txt")).unwrap(),
+            "内容v1.0"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("v1.1/p.txt")).unwrap(),
+            "内容v1.1"
+        );
+    }
+
+    /// 产物与压缩档同名（Game.apk + Game.zip）不互相去重，各办各的。
+    #[test]
+    fn product_and_archive_same_name_both_processed() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("apk")).unwrap();
+        fs::write(work.path().join("apk/AndroidManifest.xml"), "m").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("Game.apk")
+            .arg("apk")
+            .current_dir(work.path()));
+        fs::copy(work.path().join("Game.apk"), src.join("Game.apk")).unwrap();
+        fs::write(work.path().join("data.txt"), "d").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("Game.zip"))
+            .arg("data.txt")
+            .current_dir(work.path()));
+
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &Collect::new(),
+            false,
+            true,
+        );
+        assert_eq!(summary.ok.len(), 2, "产物与压缩档同名都要处理：{:?}", summary.ok);
+        // 产物落位不挤占：apk 进 out/Game/Game/；压缩档 unique_dir 避让成 Game (2)
+        assert!(out.join("Game/Game/Game.apk").is_file(), "产物应落位");
+        assert!(
+            out.join("Game/Game (2)/data.txt").is_file()
+                || out.join("Game/Game/data.txt").is_file(),
+            "压缩档应解出（与产物分目录）"
+        );
+    }
+
+    /// 去重跳过时也推进进度条：跳过包排在最后时 done 必须到达 total。
+    #[test]
+    fn dedup_skip_advances_progress_to_total() {
+        if !have_tools(&[SEVENZ, RAR]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("shared")).unwrap();
+        fs::write(work.path().join("shared/s.txt"), "x").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("a.zip"))
+            .arg("shared")
+            .current_dir(work.path()));
+        sh(Command::new(RAR)
+            .args(["a", "-r", "-ep1"])
+            .arg(&src.join("a.rar"))
+            .arg("shared")
+            .current_dir(work.path()));
+
+        struct P {
+            last: Mutex<(usize, usize)>,
+        }
+        impl RunCallback for P {
+            fn on_log(&self, _msg: &str, _level: LogLevel) {}
+            fn on_progress(&self, done: usize, total: usize, _name: &str) {
+                *self.last.lock().unwrap() = (done, total);
+            }
+        }
+        let p = P {
+            last: Mutex::new((0, 0)),
+        };
+        run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &p,
+            false,
+            true,
+        );
+        let (done, total) = *p.last.lock().unwrap();
+        assert_eq!(done, total, "跳过路径必须推进进度到 total");
+    }
+
     /// 加密 zip（7z 造，密码 123456）→ 密码库命中解出。
     #[test]
-    fn encrypted_zip_password_from_library() {
-        if !have_tools(&[SEVENZ]) {
+    fn encrypted_zip_password_from_library() {        if !have_tools(&[SEVENZ]) {
             return;
         }
         let tmp = tempdir().unwrap();
@@ -1245,6 +2177,279 @@ mod tests {
         );
         assert!(summary.ok.is_empty() && summary.failed.is_empty());
         assert_eq!(snapshot(&src), before, "源目录文件清单被改变");
+    }
+
+    /// mp4 皮 + zip + 尾部小档（四连体，二小姐.mp4 真实结构）：EOCD 拖尾容忍 + 雕出后全链路解开。
+    /// zip 是主内容体；尾部小 rar/7z 不参与（已知可接受，EOCD 优先）。
+    #[test]
+    fn mp4_zip_with_trailing_data_extracted() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("payload.txt"), "游戏本体").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("payload.zip")
+            .arg("payload.txt")
+            .current_dir(work.path()));
+        // mp4 头桩 + 完整 zip + 尾部再拖 11KB 假小档（与 28.薇薇与魔法之岛实测一致）
+        let mut stub: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
+            0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2', b'a', b'v', b'c', b'1',
+            b'm', b'p', b'4', b'1',
+        ];
+        stub.extend_from_slice(&[0u8; 64]);
+        let mut poly = stub;
+        poly.extend_from_slice(&fs::read(work.path().join("payload.zip")).unwrap());
+        poly.extend_from_slice(b"Rar!\x1a\x07\x01\x00");
+        poly.extend_from_slice(&[0u8; 11 * 1024]);
+        fs::write(src.join("二小姐.mp4"), &poly).unwrap();
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "四连体应解出：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("二小姐/payload.txt")).unwrap(),
+            "游戏本体",
+            "mp4+zip+尾部小档应解出 zip 内容：{:?}",
+            cb.all()
+        );
+        // 暂存位/雕出临时目录清理干净
+        let stray: Vec<String> = walkdir::WalkDir::new(&out)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        assert!(stray.is_empty(), "不得残留隐藏临时目录：{stray:?}");
+    }
+
+    /// fcm 真实结构：内层档藏在「包/单层目录/」里（153…/1/1.zip + 153…/存档.rar）
+    /// → 浅扫子目录解开；而第 3 层以下的游戏数据 zip（存档备份）不得触碰。
+    #[test]
+    fn nested_archives_in_shallow_subdirs_unwrapped_but_deep_ones_untouched() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        // 发布组套娃：pkg/1.zip（内含 1/deep.txt）、pkg/存档.zip（内含 save.txt）
+        fs::create_dir_all(work.path().join("pkg/1")).unwrap();
+        fs::write(work.path().join("pkg/1/deep.txt"), "深层内容").unwrap();
+        fs::write(work.path().join("pkg/save.txt"), "存档内容").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("inner1.zip")
+            .arg("1")
+            .current_dir(work.path().join("pkg")));
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("saves.zip")
+            .arg("save.txt")
+            .current_dir(work.path().join("pkg")));
+        let _ = fs::remove_dir_all(work.path().join("pkg/1"));
+        let _ = fs::remove_file(work.path().join("pkg/save.txt"));
+        // 游戏数据包：pkg/Tool/gameSaveBackup/x/y/save.zip（第 5 层，不得解）
+        fs::create_dir_all(work.path().join("pkg/Tool/gameSaveBackup/x/y")).unwrap();
+        fs::write(work.path().join("pkg/Tool/gameSaveBackup/x/y/save.dat"), "s").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("save.zip")
+            .arg("save.dat")
+            .current_dir(work.path().join("pkg/Tool/gameSaveBackup/x/y")));
+        let _ = fs::remove_file(work.path().join("pkg/Tool/gameSaveBackup/x/y/save.dat"));
+        // 外层：把 pkg 整个打进 outer.zip
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("outer.zip"))
+            .arg("pkg")
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(summary.failed.is_empty(), "失败：{:?} 日志：{:?}", summary.failed, cb.all());
+        // 浅层套娃解开
+        assert_eq!(
+            fs::read_to_string(out.join("outer/pkg/1/deep.txt")).unwrap(),
+            "深层内容",
+            "一层子目录里的 1.zip 须解开：{:?}",
+            cb.all()
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("outer/pkg/save.txt")).unwrap(),
+            "存档内容",
+            "一层子目录里的 存档.zip 须解开：{:?}",
+            cb.all()
+        );
+        // 深层游戏数据包原样保留
+        let deep = out.join("outer/pkg/Tool/gameSaveBackup/x/y/save.zip");
+        assert!(deep.is_file(), "第 3 层以下的数据 zip 不得解开：{:?}", cb.all());
+        assert!(
+            !out.join("outer/pkg/Tool/gameSaveBackup/x/y/save.dat").exists(),
+            "数据 zip 不得被解开"
+        );
+    }
+
+    /// B3 真实结构：lz4/zip 里装着无扩展名压缩档，档内顶层目录与档同名
+    /// （档 B3 内含 B3/…）→ 旧逻辑 7z 建目录撞名报「当文件已存在时，无法创建该文件」，
+    /// 内层失败但外层假成功；先挪暂存位腾名后应完整解开。
+    #[test]
+    fn inner_same_name_dir_collision_unwrapped_via_staging() {
+        if !have_tools(&[SEVENZ]) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::create_dir(work.path().join("B3")).unwrap();
+        fs::write(work.path().join("B3/secret.txt"), "B3 内容").unwrap();
+        // inner.zip 内容为 B3/，随后改名成无扩展名档 B3（B3 真实结构）
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg("inner.zip")
+            .arg("B3")
+            .current_dir(work.path()));
+        fs::rename(work.path().join("inner.zip"), work.path().join("B3x")).unwrap();
+        fs::remove_dir_all(work.path().join("B3")).unwrap();
+        fs::rename(work.path().join("B3x"), work.path().join("B3")).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-tzip"])
+            .arg(&src.join("outer.zip"))
+            .arg("B3")
+            .current_dir(work.path()));
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "同名冲突应被暂存位化解：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        // 内层档 B3 解出 B3/secret.txt（B3 目录与包名 outer 不同名，不做折叠）
+        assert_eq!(
+            fs::read_to_string(out.join("outer/B3/secret.txt")).unwrap(),
+            "B3 内容",
+            "同名嵌套须完整解开：{:?}",
+            cb.all()
+        );
+        // 内层档 B3 已消费：不再有同名「文件」残留
+        assert!(
+            !out.join("outer/B3").is_file(),
+            "内层档文件解后应删除（原位置只剩解出的目录）"
+        );
+        let stray: Vec<String> = walkdir::WalkDir::new(&out)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".unwrap_"))
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        assert!(stray.is_empty(), "不得残留暂存目录：{stray:?}");
+    }
+
+    /// 1.exe 真实全链路：SFX 自解压包（PE+7z overlay，内装 7z 分卷）→ 识别为 7z →
+    /// 解出分卷 → 族归组只解首卷 → 露出游戏内容。游戏启动 exe（纯 PE）不受影响。
+    #[test]
+    fn sfx_exe_full_chain_unwrapped() {
+        let sevenz = Path::new(SEVENZ);
+        let sfx_mod = sevenz.parent().unwrap().join("7z.sfx");
+        if !have_tools(&[SEVENZ]) || !sfx_mod.is_file() {
+            eprintln!("SKIP：本机缺少 7z.exe/7z.sfx");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("game.bin"), random_bytes(200 * 1024, 31)).unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-y", "-t7z", "-v64k", "inner.7z", "game.bin"])
+            .current_dir(work.path()));
+        let vols: Vec<String> = fs::read_dir(work.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("inner.7z.0"))
+            .collect();
+        assert!(vols.len() >= 2);
+        let mut wrap: Vec<std::ffi::OsString> = vec!["a".into(), "-y".into(), "-t7z".into(), "wrapped.7z".into()];
+        for v in &vols {
+            wrap.push(v.into());
+        }
+        let mut wcmd = Command::new(SEVENZ);
+        wcmd.args(&wrap).current_dir(work.path());
+        sh(&mut wcmd);
+        // SFX = 7z.sfx + wrapped.7z，作为源目录里的独立包
+        let mut sfx = fs::read(&sfx_mod).unwrap();
+        sfx.extend_from_slice(&fs::read(work.path().join("wrapped.7z")).unwrap());
+        fs::write(src.join("1.exe"), &sfx).unwrap();
+
+        let cb = Collect::new();
+        let summary = run(
+            &[src.clone()],
+            &out,
+            Some(&failed),
+            tool_cfg(&[]),
+            vec![],
+            &cb,
+            false,
+            true,
+        );
+        assert!(
+            summary.failed.is_empty(),
+            "SFX 全链路不应失败：{:?} 日志：{:?}",
+            summary.failed,
+            cb.all()
+        );
+        assert_eq!(
+            fs::read(out.join("1/game.bin")).unwrap(),
+            random_bytes(200 * 1024, 31),
+            "SFX → 分卷 → 游戏内容应完整解出：{:?}",
+            cb.all()
+        );
+        // 分卷族解后整族删除
+        let leftover: Vec<String> = fs::read_dir(out.join("1"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("inner.7z."))
+            .collect();
+        assert!(leftover.is_empty(), "分卷解后应整族删除：{leftover:?}");
     }
 
     /// 第一个包完成后取消 → summary.warns 含「用户取消」，且只处理了一个包。

@@ -9,6 +9,7 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = { workspace = true }
+memchr = { workspace = true }
 strsim = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

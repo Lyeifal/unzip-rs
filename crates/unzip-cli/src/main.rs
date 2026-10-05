@@ -1,4 +1,4 @@
-//! unzip-cli — 自动解压工具命令行入口（移植自 D:\Code\unzip\auto_unzip.py，行为对齐）。
+//! unzip-cli — 自动解压工具命令行入口（移植自原 Python 版 auto_unzip，行为对齐）。
 
 use std::path::PathBuf;
 use std::process::ExitCode;

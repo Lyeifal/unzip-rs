@@ -293,12 +293,41 @@ pub fn assemble_volumes(
     let (ok, text) = test_archive(ex, &first_tmp, is_rar, passwords);
     // 失败若是 "password" 字样，说明卷已齐、只是加密（7z 探针固定空密码 -p，不解密），
     // 放行交给正式解压按密码库尝试；缺卷/损坏才是真失败（对齐补卷循环的同款判断）。
+    if !ok && !is_rar && !text.to_lowercase().contains("password") {
+        // 夸克分段兜底：文件名像分卷但切点在任意字节（夸克按段下载），
+        // 规范名归集后 7z 按多卷打不开 → 按序拼接成单档再试。
+        if let Some(joined) = concat_volumes(&have, tmp_dir, &stem) {
+            let (ok2, text2) = test_archive(ex, &joined, false, passwords);
+            if ok2 || text2.to_lowercase().contains("password") {
+                return (joined, None);
+            }
+        }
+    }
     let err = if ok || text.to_lowercase().contains("password") {
         None
     } else {
         Some("分卷组装后校验未通过（可能缺卷或卷内容不对）".to_string())
     };
     (first_tmp, err)
+}
+
+/// 按 idx 序把全族卷拼接成单档（1..=max 必须连续无缺卷），供夸克任意字节分段兜底。
+fn concat_volumes(have: &BTreeMap<u32, PathBuf>, tmp_dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
+    let max = *have.keys().max()?;
+    if (1..=max).any(|i| !have.contains_key(&i)) {
+        return None; // 中段缺卷拼了也白拼
+    }
+    use std::io::{BufReader, BufWriter, Write};
+    let out = tmp_dir.join(format!("{stem}.joined.7z"));
+    let w = std::fs::File::create(&out).ok()?;
+    let mut w = BufWriter::with_capacity(8 << 20, w);
+    for i in 1..=max {
+        let f = std::fs::File::open(have.get(&i)?).ok()?;
+        let mut r = BufReader::with_capacity(8 << 20, f);
+        std::io::copy(&mut r, &mut w).ok()?;
+    }
+    w.flush().ok()?;
+    Some(out)
 }
 
 /// 独立包解压失败后的拯救：可能是改了名的首卷或散卷（rar 由 unrar 报真实卷名）。
