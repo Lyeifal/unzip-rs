@@ -1,4 +1,4 @@
-//! 纯 Rust LZ4 帧解码器（直译自原 Python 版 lz4mini）。
+//! 纯 Rust LZ4 帧解码器（帧格式/lz4 块格式，支持 legacy 链）。
 //! 支持标准帧/legacy 帧（lz4 -l）/块依赖（-BD）/多帧拼接/跳帧/未压缩块；
 //! 不校验 xxhash，解码错误以 Lz4Error 抛出。
 
@@ -26,7 +26,7 @@ const WINDOW: usize = 64 << 10; // lz4 最大匹配距离 64KB
 const LEGACY_BLOCK_MAX: usize = 8 << 20; // legacy 格式固定 8MB 块
 const IO_BUF: usize = 1 << 20; // 文件 I/O 缓冲（1MB）
 
-/// 对应 Python 的 _BLOCK_MAX.get((bd >> 4) & 7, 4 << 20)。
+/// 块大小上限表（BD 字段索引，默认 4MiB）。
 fn block_max(bd: u8) -> usize {
     match (bd >> 4) & 7 {
         4 => 64 << 10,
@@ -40,7 +40,7 @@ fn err(msg: &str) -> Lz4Error {
     Lz4Error::Msg(msg.to_string())
 }
 
-/// 读到 n 字节或 EOF 为止（与 Python `fin.read(n)` 一致：仅 EOF 才短读）。
+/// 读到 n 字节或 EOF 为止（仅 EOF 才短读）。
 fn read_up_to<R: Read>(fin: &mut R, n: usize) -> Result<Vec<u8>, Lz4Error> {
     let mut buf = vec![0u8; n];
     let mut filled = 0usize;
@@ -167,7 +167,7 @@ pub fn decompress_stream<R: Read, W: Write>(fin: &mut R, fout: &mut W) -> Result
             }
             let size =
                 u32::from_le_bytes([size_b[0], size_b[1], size_b[2], size_b[3]]) as usize;
-            let _ = read_up_to(fin, size)?; // payload 只跳过（与 Python 一致，短读不报错）
+            let _ = read_up_to(fin, size)?; // payload 只跳过（短读不报错）
             continue;
         }
         if magic == LEGACY_MAGIC {
@@ -304,7 +304,7 @@ mod tests {
             .collect()
     }
 
-    /// 与生成固件的 Python sample_data() 逐字节一致（同一 LCG 常数）。
+    /// 与参考实现的样例数据逐字节一致（同一 LCG 常数）。
     fn sample_data() -> Vec<u8> {
         sample_impl(150, 8192)
     }
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(decompress(&f0).unwrap(), vec![b'A'; 200_001]);
     }
 
-    // ---------- 手工构造：错误路径（消息与 Python 逐字一致） ----------
+    // ---------- 手工构造：错误路径（消息措辞为回归断言） ----------
 
     #[test]
     fn err_not_lz4_frame() {

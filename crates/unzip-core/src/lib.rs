@@ -1,4 +1,4 @@
-//! unzip-core — 自动解压核心库（Rust 移植版，行为对齐原 Python 版 unzip_core）。
+//! unzip-core — 自动解压核心库。
 
 pub mod assemble;
 pub mod config;

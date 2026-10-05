@@ -1,5 +1,5 @@
 //! 解压执行后端：7z/unrar 子进程、密码循环、内置 lz4、捆绑工具回退
-//! （移植自 unzip_core.py 236-360 行，语义逐条对齐）。
+//! 子进程结果约定与文案风格固定（错误消息为回归断言锚点）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -304,7 +304,7 @@ impl Extractor {
     }
 }
 
-/// 先 hard_link（目标已存在先删），失败回退 copy（对齐 Python _link_or_copy）。
+/// 先 hard_link（目标已存在先删），失败回退 copy。
 pub(crate) fn link_or_copy(src: &Path, dst: &Path) {
     if dst.exists() {
         let _ = std::fs::remove_file(dst);

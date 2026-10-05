@@ -1,4 +1,4 @@
-//! 共享数据结构（与 Python 版 unzip_core.py 的 dataclass 一一对应）。
+//! 共享数据结构。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ impl VolFamily {
     }
 }
 
-/// 7z 能解的压缩档种类（对应 Python SEVENZ_KINDS）。
+/// 7z 能解的压缩档种类。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArchiveKind {
     Zip,
@@ -159,7 +159,7 @@ pub struct Summary {
     pub warns: Vec<String>,
 }
 
-/// 日志级别，as_str() 与 Python 版 level 字符串完全一致（前端按此着色）。
+/// 日志级别，as_str() 措辞固定（前端按此着色）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LogLevel {
     Ok,
@@ -198,7 +198,7 @@ impl RunCallback for NullCallback {
 }
 
 /// 词法归一化：去掉 . 和 .. 分量、统一分隔符，不要求路径存在
-///（对齐 Python Path.resolve(strict=False) 的语义）。
+///（resolve(strict=False) 语义）。
 pub(crate) fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();

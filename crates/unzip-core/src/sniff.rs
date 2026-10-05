@@ -1,12 +1,12 @@
 //! 类型识别：魔数嗅探、媒体判定、嵌入伪装识别、卷名解析
-//! （移植自 unzip_core.py 150-232 行；嵌入识别为 Rust 版新增，见下方说明）。
+//! 类型识别：魔数嗅探、媒体判定、嵌入伪装识别、卷名解析。
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::types::{PkgKind, VolFamily, VolumeRef};
 
-/// 魔数表（顺序即 Python ARCHIVE_MAGICS 的匹配顺序）。
+/// 魔数表（匹配顺序即表序）。
 const ARCHIVE_MAGICS: &[(&[u8], &str)] = &[
     (b"PK\x03\x04", "zip"),
     (b"PK\x05\x06", "zip"),
@@ -22,7 +22,7 @@ const ARCHIVE_MAGICS: &[(&[u8], &str)] = &[
     (b"\x28\xb5\x2f\xfd", "zstd"),
 ];
 
-/// 无魔数时按扩展名回退（对应 Python EXT_FALLBACK）。
+/// 无魔数时按扩展名回退。
 const EXT_FALLBACK: &[(&str, &str)] = &[
     (".zip", "zip"),
     (".rar", "rar"),
@@ -38,7 +38,7 @@ const EXT_FALLBACK: &[(&str, &str)] = &[
     (".lz4", "lz4"),
 ];
 
-/// 复合 tar 后缀（对应 Python archive_stem 里的元组，顺序一致）。
+/// 复合 tar 后缀（archive_stem 按此表序匹配）。
 const TAR_SUFFIXES: &[&str] = &[
     ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".tbz", ".txz",
 ];
@@ -46,7 +46,7 @@ const TAR_SUFFIXES: &[&str] = &[
 /// `.7z|.zip|.rar.\d{3}` 复合后缀中点号部分的长度（".7z"=3，其余 4）。
 const NUMERIC_VOL_SEPS: &[(&str, usize)] = &[(".7z", 3), (".zip", 4), (".rar", 4)];
 
-// ---------- 嵌入伪装识别（Python 版无此能力，Rust 版新增） ----------
+// ---------- 嵌入伪装识别（扩展能力） ----------
 // 真实发布组常见手法：真图片/视频做封面 + 压缩档紧随其后（jpg+rar 多形体），
 // 或给压缩档加一段垃圾前缀，或「完整媒体 + 追加压缩档到文件尾」（大视频常见：
 // mp4 本体完整可播，zip/rar 接在后面，见 embedded_tail_offset）。文件头嗅探只能
@@ -464,7 +464,7 @@ pub fn sniff(path: &Path) -> Option<&'static str> {
     embedded_kind(path)
 }
 
-/// 与 Python classify 完全一致的字符串版：返回 "product"/"media"/kind/None。
+/// 字符串版分类：返回 "product"/"media"/kind/None。
 /// （`classify` 的 PkgKind 无法表示 "media"，扫描层需要用本函数保留该区分。）
 pub(crate) fn classify_str(path: &Path, product_exts: &[String]) -> Option<&'static str> {
     let name = file_name_string(path);
@@ -494,7 +494,7 @@ pub fn classify(path: &Path, product_exts: &[String]) -> Option<PkgKind> {
     }
 }
 
-/// 类似 Python Path.suffix：最后一个 `.` 起的部分（含点）；无前缀点或无点返回 ""。
+/// 路径后缀（suffix）：最后一个 `.` 起的部分（含点）；无前缀点或无点返回 ""。
 pub(crate) fn suffix_with_dot(name: &str) -> &str {
     match name.rfind('.') {
         Some(i) if i > 0 => &name[i..],
@@ -502,7 +502,7 @@ pub(crate) fn suffix_with_dot(name: &str) -> &str {
     }
 }
 
-/// 类似 Python Path.stem：去掉最后一个后缀；点开头的名字整体视为 stem。
+/// 路径主名（stem）：去掉最后一个后缀；点开头的名字整体视为 stem。
 fn path_stem(name: &str) -> &str {
     match name.rfind('.') {
         Some(i) if i > 0 => &name[..i],
@@ -517,7 +517,7 @@ fn file_name_string(path: &Path) -> String {
 }
 
 /// 解析纯 ASCII 十进制数字（容忍前导零；超长时饱和到 u32::MAX，
-/// 保住 Python 语义里 "idx>1 / idx==1" 的判定）。
+/// 保住 "idx>1 / idx==1" 的判定语义）。
 fn parse_idx(digits: &str) -> u32 {
     let trimmed = digits.trim_start_matches('0');
     if trimmed.is_empty() {
@@ -528,7 +528,7 @@ fn parse_idx(digits: &str) -> u32 {
 }
 
 /// ASCII 大小写折叠（不改字节长度）。卷名/复合后缀模式全是 ASCII：
-/// 折叠后对 ASCII 的匹配结果与 Python lower() 一致，且 UTF-8 多字节序列
+/// 折叠后对 ASCII 的匹配结果与 lower() 语义一致，且 UTF-8 多字节序列
 /// 不可能匹配 ASCII 模式字节，所有派生索引都落在字符边界上。
 pub(crate) fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| b.to_ascii_lowercase()).collect()
@@ -633,8 +633,8 @@ pub fn parse_volume_name(name: &str) -> Option<VolumeRef> {
             }
         }
     }
-    // ^(.*)\.7z\.(\d{3})$ | ^(.*)\.zip\.(\d{3})$（注意：Python 没有 .rar.\d{3} 族；
-    // Rust 版容忍「删」类尾标与夸克 .7z-<hash> 形态）
+    // ^(.*)\.7z\.(\d{3})$ | ^(.*)\.zip\.(\d{3})$（仅这两族有数字卷；
+    // 容忍「删」类尾标与夸克 .7z-<hash> 形态）
     for (sep, family) in [(".7z", VolFamily::SevenZNum), (".zip", VolFamily::ZipNum)] {
         if let Some((stem_len, idx)) = match_num_vol_tail(&n, sep) {
             return Some(VolumeRef {
@@ -776,7 +776,7 @@ mod tests {
         assert_eq!(sniff(&unknown), None);
     }
 
-    // ---------- 嵌入伪装识别（多形体/垃圾前缀，Python 版无此能力） ----------
+    // ---------- 嵌入伪装识别（多形体/垃圾前缀） ----------
 
     /// 最小 JPEG：JFIF 头 + EOI。封面图部分任意，魔数在 EOI 之后。
     fn minimal_jpg() -> Vec<u8> {
@@ -1172,7 +1172,7 @@ mod tests {
         assert_eq!((v.stem.as_str(), v.family, v.idx), ("game", VolFamily::SevenZNum, 2));
         let v = parse_volume_name("MiX.Part3.RAR").unwrap();
         assert_eq!((v.stem.as_str(), v.family, v.idx), ("mix", VolFamily::RarPart, 3));
-        // part0 是合法卷名（idx 0，Python int("0")=0；扫描时既非 idx>1 也非首卷）
+        // part0 是合法卷名（idx 0；扫描时既非 idx>1 也非首卷）
         let v = parse_volume_name("a.part0.rar").unwrap();
         assert_eq!((v.stem.as_str(), v.family, v.idx), ("a", VolFamily::RarPart, 0));
     }
@@ -1228,7 +1228,7 @@ mod tests {
         let v = parse_volume_name("某游戏.PART02.RAR").unwrap();
         assert_eq!((v.stem.as_str(), v.family, v.idx), ("某游戏", VolFamily::RarPart, 2));
         assert_eq!(archive_stem("副本.tar.gz"), "副本");
-        // 长数字不是 r/z 族卷名（Python 正则 \d{2} 严格两位）
+        // 长数字不是 r/z 族卷名（\d{2} 严格两位）
         assert!(parse_volume_name("a.r99999999999").is_none());
         // 两位数字上限：r99 → idx 100
         let v = parse_volume_name("a.r99").unwrap();

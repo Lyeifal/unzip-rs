@@ -1,4 +1,4 @@
-//! unzip-cli — 自动解压工具命令行入口（移植自原 Python 版 auto_unzip，行为对齐）。
+//! unzip-cli — 自动解压工具命令行入口。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -300,7 +300,7 @@ fn main() -> ExitCode {
         .or_else(|| (!cfg.failed_dir.is_empty()).then(|| PathBuf::from(&cfg.failed_dir)))
         .unwrap_or_else(|| out_root.join("解压失败"));
 
-    // 目录目标作为分组根；文件目标按根目录散包处理（与 Python 版一致：取首个文件的父目录）
+    // 目录目标作为分组根；文件目标按根目录散包处理（取首个文件的父目录）
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     for s in &args.targets {

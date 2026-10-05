@@ -1,4 +1,4 @@
-//! config.json 读写（schema 与 Python 版 DEFAULT_CONFIG 完全一致，旧配置可直接导入）。
+//! config.json 读写（schema 稳定，旧配置可直接导入）。
 
 use std::path::{Path, PathBuf};
 
@@ -56,7 +56,7 @@ impl Default for Config {
 }
 
 /// config.json 位置：优先环境变量 UNZIP_CONFIG_PATH（GUI 模式指向应用数据目录），
-/// 默认 exe 所在目录（便携，与 Python 版放脚本旁一致）。
+/// 默认 exe 所在目录（便携，配置与 exe 同目录）。
 pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("UNZIP_CONFIG_PATH") {
         return PathBuf::from(p);
@@ -80,7 +80,7 @@ pub fn load_config() -> Config {
     load_config_from(&config_path())
 }
 
-/// 从指定路径读配置；缺文件/坏 JSON 都静默回退默认（对齐 Python load_config）。
+/// 从指定路径读配置；缺文件/坏 JSON 都静默回退默认。
 pub fn load_config_from(path: &Path) -> Config {
     let mut cfg = Config::default();
     if let Ok(text) = std::fs::read_to_string(path) {
@@ -91,7 +91,7 @@ pub fn load_config_from(path: &Path) -> Config {
     cfg
 }
 
-/// 原子写（tmp + rename），失败返回 false（对齐 Python save_config）。
+/// 原子写（tmp + rename），失败返回 false。
 pub fn save_config(cfg: &Config) -> bool {
     save_config_to(cfg, &config_path())
 }
@@ -108,7 +108,7 @@ pub fn save_config_to(cfg: &Config, path: &Path) -> bool {
     std::fs::rename(&tmp, path).is_ok()
 }
 
-/// 最近成功优先：把命中密码置顶并落盘（对齐 Python promote_password）。
+/// 最近成功优先：把命中密码置顶并落盘。
 pub fn promote_password(cfg: &mut Config, pw: &str) {
     if let Some(pos) = cfg.passwords.iter().position(|p| p == pw) {
         cfg.passwords.remove(pos);
@@ -117,7 +117,7 @@ pub fn promote_password(cfg: &mut Config, pw: &str) {
     save_config(cfg);
 }
 
-/// 规则的可读描述（GUI/CLI 展示用，文案与 Python format_rule 一致）。
+/// 规则的可读描述（GUI/CLI 展示用，措辞固定）。
 pub fn format_rule(rule: &PasswordRule) -> String {
     let cond = if !rule.suffix.trim().is_empty() {
         format!("后缀为 {}", rule.suffix.trim())

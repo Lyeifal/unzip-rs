@@ -1,5 +1,5 @@
 //! 解包与主流程：unwrap_folder 递归、lz4 链、extract_package、run()。
-//! （移植自 unzip_core.py 783-1076 行）
+//! unwrap 递归、lz4 链、单包处理与主循环。
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,7 +20,7 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 类似 Python Path.stem：去掉最后一个后缀；点开头的名字整体视为 stem。
+/// 路径主名（stem）：去掉最后一个后缀；点开头的名字整体视为 stem。
 fn stem_of(p: &Path) -> String {
     let name = file_name(p);
     match name.rfind('.') {
@@ -29,7 +29,7 @@ fn stem_of(p: &Path) -> String {
     }
 }
 
-/// 类似 Python Path.suffix。
+/// 路径后缀（suffix，含点；无前缀点或无点返回空）。
 fn suffix_of(p: &Path) -> String {
     let name = file_name(p);
     match name.rfind('.') {
@@ -38,7 +38,7 @@ fn suffix_of(p: &Path) -> String {
     }
 }
 
-/// 重名递增：base 不存在直接用；否则 "name (2)"…"name (999)"（对齐 Python unique_dir）。
+/// 重名递增：base 不存在直接用；否则 "name (2)"…"name (999)"。
 fn unique_dir(base: &Path) -> PathBuf {
     if !base.exists() {
         return base.to_path_buf();
@@ -129,7 +129,7 @@ const COLLAPSE_SUFFIXES: &[&str] = &[
 
 /// 折叠单一层同名嵌套：dest 里只剩一个目录，且其名等于 dest 名（或 dest 名去压缩后缀，
 /// ASCII 大小写不敏感）→ 内容上移一层。避免 out/X/X 双套同名目录（发布组常把文件夹
-/// 原样打包，包名又取得和文件夹一样）。Python 版不做折叠（Rust 版有意差异）。
+/// 原样打包，包名又取得和文件夹一样）。折叠为有意设计。
 /// 上移中途失败则回滚已移动项、记警告、保持原结构。
 fn collapse_same_name_dir(dest: &Path, cb: &dyn RunCallback) {
     let base = crate::sniff::ascii_lower(file_name(dest).as_bytes());
@@ -371,7 +371,7 @@ fn run_level(
             None => f.clone(),
         };
         let err = match kind {
-            // Python 先走 extract_archive（7z 必失败）再进 _unwrap_lz4，结果等价。
+            // 直接进 lz4 解码链（等价于先按压缩档探测失败再走 lz4）。
             PkgKind::Lz4 => unwrap_lz4(&src, into, ex, cfg, passwords),
             PkgKind::Archive(ak) => {
                 let carved = carve_to_temp(&src, *ak);
@@ -468,9 +468,9 @@ fn unwrap_folder(
     }
 
     // 只要有可解对象（独立压缩档或分卷族）就继续解包——目录里混有已解出的
-    // 子目录、产物、readme 等杂项也不放弃。Python 版 `if dirs or ...` 直接
-    // return，真实发布组结构「加密 game.7z + 全CG存档/」会因此把游戏包残留
-    // 在输出里（用户实测踩坑），属有意差异。失败包留原地并告警，无进展不递归。
+    // 子目录、产物、readme 等杂项也不放弃（真实发布组结构「加密 game.7z +
+    // 全CG存档/」混装很常见，用户实测踩坑；杂项不阻断为有意设计）。
+    // 失败包留原地并告警，无进展不递归。
     ctx.cb.on_log(
         &format!("[解包] {} 内仍是压缩包，继续解包…", file_name(dest)),
         LogLevel::Info,
@@ -702,7 +702,7 @@ fn extract_package(
         let mut err: Option<String> = None;
         let mut pw: Option<String> = None;
         // 本包完整密码序列：规则+库，并合并运行时密码（CLI --password 追加）。
-        // lz4 链、正式解压、内层解包共用同一份，层间行为一致（Python 内层只看运行时密码，有意差异）。
+        // lz4 链、正式解压、内层解包共用同一份，层间行为一致（内层不再缺密码）。
         let mut pw_list = order_passwords(pkg, cfg);
         for p in ctx.passwords {
             if !pw_list.contains(p) {
@@ -929,7 +929,7 @@ pub fn run(
             continue;
         }
         // 同组同名去重：a.zip + a.rar 这类同 stem 双格式只解第一个，
-        // 避免同一内容解出 out/a/a 与 out/a/a (2) 两份（源文件不动；Python 版两份都解，有意差异）。
+        // 避免同一内容解出 out/a/a 与 out/a/a (2) 两份（源文件不动；只解一份为有意设计）。
         // 只在首个包成功后才登记：首个若解压失败，允许后续同名格式兜底重试。
         let dedup_key = dedup_key(&pkgs[i]);
         if !dry_run && dedup_key.as_ref().is_some_and(|k| seen_names.contains(k)) {
@@ -1193,7 +1193,7 @@ mod tests {
 
         let before = snapshot(&src);
         let cb = Collect::new();
-        // 注意：unrar 探针循环按密码列表驱动（对齐 Python：空列表时探针不执行），
+        // 注意：unrar 探针循环按密码列表驱动（空列表时探针不执行），
         // 因此必须像真实使用一样给密码库（内容随意，未加密卷不受密码影响）。
         let summary = run(
             &[src.clone()],
@@ -1274,7 +1274,7 @@ mod tests {
     }
 
     /// 外层 zip 内是加密 zip（密码只在配置库）→ 解包阶段用密码库命中并解出。
-    /// 回归：Python 版 unwrap 只看运行时密码，GUI 下内层加密档必失败（Rust 有意差异）。
+    /// 回归：内层解包必须能用密码库解锁（仅运行时密码时 GUI 下内层加密档必失败，已修正）。
     #[test]
     fn encrypted_inner_archive_unwrapped_with_library_password() {
         if !have_tools(&[SEVENZ]) {
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     /// 外层包内「加密游戏.7z + 已解出的目录 + readme 杂项」混装时仍要继续解包
-    /// （Python 版因目录存在直接放弃内层解包，LABYRINTHOS v1.031 真实案例）。
+    /// （目录存在即放弃内层解包的旧行为会让 LABYRINTHOS v1.031 这类真实案例解不出）。
     #[test]
     fn inner_archive_alongside_dirs_and_stray_files_still_unwrapped() {
         if !have_tools(&[SEVENZ]) {

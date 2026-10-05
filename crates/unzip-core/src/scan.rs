@@ -1,4 +1,4 @@
-//! 全树扫描与建包（移植自 unzip_core.py 456-578 行）。
+//! 全树扫描与建包。
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -9,14 +9,14 @@ use crate::config::Config;
 use crate::sniff::{archive_stem, classify_str, parse_volume_name, suffix_with_dot};
 use crate::types::{is_under, normalize, ArchiveKind, Package, PkgKind, ScanResult, VolFamily};
 
-/// 无魔数未知文件的后缀黑名单（对应 Python ORPHAN_BLACKLIST；.json 去重；
+/// 无魔数未知文件的后缀黑名单（.json 去重；
 /// .pdf 为 Rust 版新增：附带广告 PDF 很常见，按普通文件跳过而非「无法识别」告警）。
 const ORPHAN_BLACKLIST: &[&str] = &[
     ".txt", ".md", ".nfo", ".url", ".html", ".htm", ".json", ".log", ".ini",
     ".lnk", ".bat", ".cmd", ".exe", ".msi", ".dll", ".sys", ".py", ".pdf",
 ];
 
-/// 未下载完成的临时文件后缀（对应 Python 里的 endswith 判断；.qkdownloading
+/// 未下载完成的临时文件后缀（后缀匹配；.qkdownloading
 /// 为 Rust 版新增：夸克网盘下载中的临时文件，避免半成品被当压缩包移入失败目录）。
 const DOWNLOADING_SUFFIXES: &[&str] =
     &[".baiduyun.p.downloading", ".downloading", ".download", ".qkdownloading"];
@@ -64,7 +64,7 @@ pub fn scan_sources(
         };
 
         // 第一遍：只收分卷（idx>1）与首卷（idx==1 且是归档/lz4）。
-        // Python 单遍里 stem.rar/stem.zip 的主卷补位依赖枚举顺序；这里先收齐全部
+        // 单遍收集会让 stem.rar/stem.zip 的主卷补位依赖枚举顺序；这里先收齐全部
         // 分卷，第二遍再补位，结果与顺序无关（唯一的行为改进，其余逻辑相同）。
         let mut consumed: HashSet<PathBuf> = HashSet::new();
         for f in &files {
@@ -81,14 +81,14 @@ pub fn scan_sources(
             }
             let Some(volref) = parse_volume_name(&lower) else { continue };
             if volref.idx > 1 {
-                // Python 只要求 kind != "product"（无魔数的 .002 也算分卷）
+                // 只要求 kind != "product"（无魔数的 .002 也算分卷）
                 scan.volumes
                     .entry((volref.family, volref.stem))
                     .or_default()
                     .insert(volref.idx, f.clone());
                 consumed.insert(f.clone());
             } else if kind.and_then(PkgKind::from_kind_str).is_some() {
-                // Python：kind in SEVENZ_KINDS or kind == "lz4" 且 idx==1 → vol_firsts
+                // 压缩档/lz4 且 idx==1 → vol_firsts（7z 可解族与 lz4 才能当首卷）
                 scan.vol_firsts.insert((volref.family, volref.stem), f.clone());
                 consumed.insert(f.clone());
             }
@@ -188,7 +188,7 @@ pub fn build_packages(scan: &mut ScanResult, roots: &[PathBuf]) -> Vec<Package> 
     }
 
     // 无主分卷：找不到首卷的卷族，按文件名列出（排序仅为输出确定；
-    // Python 为 dict 插入序，单族时无差别）。
+    // 排序仅为输出确定）。
     let mut leftover: Vec<(VolFamily, String)> = scan
         .volumes
         .keys()
@@ -205,7 +205,7 @@ pub fn build_packages(scan: &mut ScanResult, roots: &[PathBuf]) -> Vec<Package> 
         scan.warns.push(format!("无主分卷（找不到首卷，已忽略）：{names}"));
     }
 
-    // 按首卷全路径小写排序（Python sort 稳定，这里同样稳定）
+    // 按首卷全路径小写排序（稳定排序）
     pkgs.sort_by(|a, b| {
         a.first
             .to_string_lossy()
@@ -215,7 +215,7 @@ pub fn build_packages(scan: &mut ScanResult, roots: &[PathBuf]) -> Vec<Package> 
     pkgs
 }
 
-/// 对应 Python _make_pkg：root/rel 归属 + archive_stem 取名。
+/// root/rel 归属 + archive_stem 取名。
 fn make_pkg(
     first: &Path,
     kind: PkgKind,
@@ -227,7 +227,7 @@ fn make_pkg(
     let mut root = None;
     let mut rel = None;
     for r in roots {
-        // 对齐 Python _rel_to：resolve(strict=False) 后取相对路径
+        // resolve(strict=False) 后取相对路径
         if let Ok(stripped) = normalize(first).strip_prefix(normalize(r)) {
             root = Some(r.clone());
             rel = Some(stripped.to_path_buf());
@@ -324,7 +324,7 @@ mod tests {
         let sub = root.join("sub");
         fs::create_dir(&sub).unwrap();
         let first = write(root, "a.7z.001", SEVENZ_MAGIC);
-        // 真实场景 .002 无魔数；Python 只要求 kind != "product"，仍算分卷
+        // 真实场景 .002 无魔数；只要求 kind != "product"，仍算分卷
         let second = write(&sub, "a.7z.002", b"\x00\x01\x02\x03");
 
         let mut scan = scan_sources(&[root.to_path_buf()], true, &cfg(), None, None);
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(pkgs[0].volumes.len(), 1); // 只有 idx2；idx1 的 z00 被主卷补位覆盖
         assert_eq!(pkgs[0].volumes.get(&2), Some(&z01));
         assert!(scan.warns.is_empty());
-        let _ = z00; // z00 是 idx1，被主卷补位覆盖（与 Python dict 赋值一致）
+        let _ = z00; // z00 是 idx1，被主卷补位覆盖
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! 分卷组装与改名卷领养（移植自 unzip_core.py 581-778 行）。
+//! 分卷组装与改名卷领养。
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -7,9 +7,9 @@ use crate::extract::{link_or_copy, Extractor};
 use crate::sniff::expected_vol_name;
 use crate::types::{normalize, ArchiveKind, LogLevel, Package, PkgKind, RunCallback, ScanResult};
 
-/// 每个缺失卷最多试装的候选数（对应 Python MAX_TRY_PER_SLOT）。
+/// 每个缺失卷最多试装的候选数。
 const MAX_TRY_PER_SLOT: usize = 12;
-/// 试装总轮数上限（对齐 Python tries < 60）。
+/// 试装总轮数上限。
 const MAX_TRIES: u32 = 60;
 
 /// unrar 探针结果。
@@ -75,7 +75,7 @@ fn test_archive(ex: &Extractor, path: &Path, is_rar: bool, passwords: &[String])
     }
 }
 
-/// 在 unrar 输出里找 `Cannot find volume\s+(\S+)`（大小写敏感，与 Python 一致），
+/// 在 unrar 输出里找 `Cannot find volume\s+(\S+)`（大小写敏感），
 /// 返回缺失卷 basename（取 \ 或 / 后最后一段）。
 fn find_missing_volume(text: &str) -> Option<String> {
     const KEY: &str = "Cannot find volume";
@@ -98,7 +98,7 @@ fn find_missing_volume(text: &str) -> Option<String> {
 }
 
 /// 跑 unrar t 探针：对去重(passwords) 前 4 个逐个 t -p{pw}（pw 为空则不带 -p）。
-/// 循环体内无条件 return（与 Python 一致），只有密码列表为空时才落到最后一个状态。
+/// 循环体内无条件 return，只有密码列表为空时才落到最后一个状态。
 fn unrar_probe(ex: &Extractor, path: &Path, passwords: &[String]) -> UnrarProbe {
     let cands = dedup(passwords);
     if cands.is_empty() {
