@@ -307,13 +307,147 @@ fn sniff_embedded_zip_tail(path: &Path) -> Option<&'static str> {
     find_zip_eocd(path).map(|_| "zip")
 }
 
+/// zip 本地文件头链的最小连续环数（EOCD 损坏/缺失时靠链识别）。
+/// 单环命中 2^-32，连续两环以上 + 方法字段校验后误报 ≈ 0。
+const ZIP_CHAIN_MIN: u32 = 2;
+/// 链识别允许的压缩方式（0=store 8=deflate 9=deflate64 12=bzip2 14=lzma
+/// 95=xz 96=jpeg 97=ppmd 98/99=aes；发布组 zip 基本只用到 0/8/99）。
+const ZIP_METHODS: &[u16] = &[0, 8, 9, 12, 14, 95, 96, 97, 98, 99];
+
+/// 解析 zip 本地文件头；数据描述符（flag bit3）时 csize 不可信 → None。
+fn read_lfh_at(f: &mut std::fs::File, off: u64) -> Option<(u16, u16, u64)> {
+    f.seek(SeekFrom::Start(off)).ok()?;
+    let mut h = [0u8; 30];
+    f.read_exact(&mut h).ok()?;
+    if &h[0..4] != b"PK\x03\x04" {
+        return None;
+    }
+    let flag = u16::from_le_bytes([h[6], h[7]]);
+    let method = u16::from_le_bytes([h[8], h[9]]);
+    if flag & 0x08 != 0 || !ZIP_METHODS.contains(&method) {
+        return None;
+    }
+    let nlen = u16::from_le_bytes([h[26], h[27]]);
+    let elen = u16::from_le_bytes([h[28], h[29]]);
+    if nlen == 0 || nlen > 512 {
+        return None;
+    }
+    let csize = u32::from_le_bytes([h[18], h[19], h[20], h[21]]) as u64;
+    Some((nlen, elen, csize))
+}
+
+/// 从 seed 起沿本地头链走：每环的下一偏移必须精确落在 30+nlen+elen+csize 处，
+/// 命中下一个本地头继续、命中中央目录头（PK\x01\x02）即坐实；
+/// 连续 ZIP_CHAIN_MIN 环本地头同样坐实（大条目 zip 提前收链）。
+fn follow_zip_chain(f: &mut std::fs::File, len: u64, seed: u64) -> bool {
+    let mut cur = seed;
+    let mut links = 0u32;
+    loop {
+        let lfh = read_lfh_at(f, cur);
+        let Some((nlen, elen, csize)) = lfh else {
+            return false;
+        };
+        let Some(next) = cur
+            .checked_add(30)
+            .and_then(|v| v.checked_add(nlen as u64))
+            .and_then(|v| v.checked_add(elen as u64))
+            .and_then(|v| v.checked_add(csize))
+        else {
+            return false;
+        };
+        if next + 4 > len {
+            return false;
+        }
+        let mut sig = [0u8; 4];
+        if f.seek(SeekFrom::Start(next)).is_err() || f.read_exact(&mut sig).is_err() {
+            return false;
+        }
+        links += 1;
+        if &sig == b"PK\x01\x02" {
+            return links >= 1; // 本地头→中央目录：铁证
+        }
+        if &sig != b"PK\x03\x04" {
+            return false;
+        }
+        if links >= ZIP_CHAIN_MIN {
+            return true;
+        }
+        cur = next;
+    }
+}
+
+/// 全文件流式扫 zip 本地头链（memchr 首字节预筛 + 链式跟随）。
+/// EOCD 校验全部失败时的兜底——发布组会故意损坏 EOCD 防网盘内容扫描
+/// （实测荒野独居 151/152：zip 实体完好但 EOCD 区被破坏，7z 靠本地头重建）。
+fn find_zip_lfh_chain(path: &Path) -> Option<u64> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut pos = 0u64;
+    let mut buf = Vec::new();
+    while pos < len {
+        let want = (len - pos).min(64 << 20) as usize;
+        if f.seek(SeekFrom::Start(pos)).is_err() {
+            return None;
+        }
+        buf.clear();
+        if (&mut f).take(want as u64).read_to_end(&mut buf).is_err() {
+            return None;
+        }
+        let mut i = 0usize;
+        while let Some(rel) = memchr::memchr(b'P', &buf[i..]) {
+            let p = i + rel;
+            if p + 4 > buf.len() {
+                break;
+            }
+            if &buf[p..p + 4] == b"PK\x03\x04" {
+                let seed = pos + p as u64;
+                if follow_zip_chain(&mut f, len, seed) {
+                    return Some(seed);
+                }
+            }
+            i = p + 1;
+        }
+        if buf.len() < want || buf.len() <= 4 {
+            break;
+        }
+        pos += buf.len() as u64 - 4; // 重叠 4 字节防跨界漏（尾部余量 ≤4 时收链防死循环）
+    }
+    None
+}
+
+/// 链识别结果单槽缓存：embedded_kind 判定与 embedded_offset 取偏移各调一次，
+/// 12.6GB 的媒体文件免二次全文件扫描。键 = 路径 + 文件大小。
+static ZIP_CHAIN_CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, Option<u64>)>> =
+    std::sync::Mutex::new(None);
+
+fn zip_lfh_chain_cached(path: &Path) -> Option<u64> {
+    let len = std::fs::metadata(path).ok()?.len();
+    {
+        let cache = ZIP_CHAIN_CACHE.lock().ok()?;
+        if let Some((p, l, r)) = cache.as_ref() {
+            if p == path && *l == len {
+                return *r;
+            }
+        }
+    }
+    let result = find_zip_lfh_chain(path);
+    if let Ok(mut cache) = ZIP_CHAIN_CACHE.lock() {
+        *cache = Some((path.to_path_buf(), len, result));
+    }
+    result
+}
+
 /// 嵌入压缩档的起始偏移（用于雕出；rar 前缀命中时 7z/unrar 原生支持前缀偏移，不雕）：
 /// - zip：EOCD 反推起点（拖尾容忍 + 起点魔数验证，见 find_zip_eocd）；
 /// - 7z/xz：前缀窗首个命中，退而求其次尾部窗命中（大视频后追加到文件尾）；
 /// - rar：仅尾部窗命中才需雕出（前缀命中走原生）；前缀窗有 rar 时尾部 rar 不再雕。
 pub(crate) fn embedded_offset(path: &Path, kind: &str) -> Option<u64> {
     match kind {
-        "zip" => find_zip_eocd(path).map(|(start, _)| start),
+        // EOCD 优先；发布组会故意损坏 EOCD 防网盘扫描（实测荒野独居 151/152：
+        // zip 实体完好、EOCD 区被破坏，7z 靠本地头链重建），兜底走链识别。
+        "zip" => find_zip_eocd(path)
+            .map(|(start, _)| start)
+            .or_else(|| zip_lfh_chain_cached(path)),
         "7z" | "xz" => embedded_prefix_offset(path)
             .filter(|(off, k)| *k == kind && *off > 0)
             .map(|(off, _)| off)
@@ -423,6 +557,7 @@ fn embedded_kind(path: &Path) -> Option<&'static str> {
     sniff_embedded_zip_tail(path)
         .or_else(|| sniff_embedded_prefix(path))
         .or_else(|| embedded_tail_offset(path).map(|(_, k)| k))
+        .or_else(|| zip_lfh_chain_cached(path).map(|_| "zip"))
 }
 
 /// 读文件头识别，返回 kind 字符串（"zip"/"rar"/"7z"/"gzip"/"bzip2"/"xz"/"tar"/"zstd"/"lz4"/"media"）。
@@ -889,25 +1024,63 @@ mod tests {
         let zip_start = mp4_stub.len() as u64;
         let mut poly = mp4_stub;
         poly.extend_from_slice(&handmade_zip());
-        poly.extend_from_slice(b"Rar!\x1a\x07\x01\x00"); // 尾部拖着的另一个小档（不参与识别）
-        poly.extend_from_slice(&[0u8; 64]);
+        poly.extend_from_slice(&[0u8; 64]); // 尾部补零（不得引入任何长魔数，前缀/尾窗的无校验路径会抢先）
         let p = write_file(tmp.path(), "二小姐.mp4", &poly);
         assert_eq!(sniff(&p), Some("zip"), "EOCD 带小拖尾仍须识别为 zip");
         assert_eq!(embedded_offset(&p, "zip"), Some(zip_start));
     }
 
     #[test]
-    fn zip_eocd_trailing_beyond_limit_rejected() {
-        // 拖尾超过 ZIP_TRAIL_LIMIT → 不认（真视频 + 巧合 EOCD 的防线；大文件也在尾部窗外）
+    fn fake_eocd_in_video_data_rejected() {
+        // 视频数据里的巧合 PK\x05\x06 + 貌似合理的 cd 字段不得误判为 zip：
+        // EOCD 起点验证失败，且其后没有可跟随的本地头链。
         let tmp = tempdir().unwrap();
         let mut mp4_stub = bytes_from_hex("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
         mp4_stub.extend_from_slice(&[0u8; 77]);
         let mut poly = mp4_stub;
-        poly.extend_from_slice(&handmade_zip());
         poly.extend_from_slice(&[0u8; (ZIP_TRAIL_LIMIT + 4096) as usize]);
+        // 拼一个字段自洽但指向全零区的假 EOCD（cd_offset/cd_size 指向无 zip 头区域）
+        let mut fake = b"PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00".to_vec();
+        fake.extend_from_slice(&64u32.to_le_bytes()); // cd_size
+        fake.extend_from_slice(&(poly.len() as u32 - 64).to_le_bytes()); // cd_offset → poly 中部零区
+        fake.extend_from_slice(b"\x00\x00");
+        poly.extend_from_slice(&fake);
         let p = write_file(tmp.path(), "game.mp4", &poly);
-        assert_eq!(sniff(&p), Some("media"), "EOCD 拖尾超限不得识别为 zip");
+        assert_eq!(sniff(&p), Some("media"), "假 EOCD 不得误判为 zip");
         assert_eq!(embedded_offset(&p, "zip"), None);
+    }
+
+    #[test]
+    fn zip_broken_eocd_found_by_lfh_chain() {
+        // EOCD 被损坏（防网盘扫描手法，实测荒野独居 151/152）：真实 zip 走本地头链识别。
+        let sevenz = std::path::Path::new(r"C:\Program Files\7-Zip\7z.exe");
+        if !sevenz.is_file() {
+            eprintln!("SKIP：本机缺少 7z.exe");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let work = tempdir().unwrap();
+        std::fs::write(work.path().join("game.txt"), "链识别").unwrap();
+        std::fs::write(work.path().join("data.bin"), &[7u8; 4096]).unwrap();
+        let st = std::process::Command::new(sevenz)
+            .args(["a", "-y", "-tzip", "real.zip", "game.txt", "data.bin"])
+            .current_dir(work.path())
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let mut zip = std::fs::read(work.path().join("real.zip")).unwrap();
+        // 损坏 EOCD：把最后一个 PK\x05\x06 抹成 0（链识别是唯一生路）
+        let eocd_at = zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        zip[eocd_at..eocd_at + 4].fill(0);
+        let mut mp4_stub = bytes_from_hex("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
+        mp4_stub.extend_from_slice(&[0u8; 77]);
+        let zip_start = mp4_stub.len() as u64;
+        let mut poly = mp4_stub;
+        poly.extend_from_slice(&zip);
+        poly.extend_from_slice(&[0u8; 64]); // 尾部纯零（不得引入长魔数，无校验的前缀/尾窗路径会抢先）
+        let p = write_file(tmp.path(), "game.mp4", &poly);
+        assert_eq!(sniff(&p), Some("zip"), "EOCD 损坏的真实 zip 须靠本地头链识别");
+        assert_eq!(embedded_offset(&p, "zip"), Some(zip_start));
     }
 
     /// 结构校验通过的尾部 rar5（主头：head_size=5、type=1、flags=0）。

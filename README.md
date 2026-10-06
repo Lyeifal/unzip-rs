@@ -133,6 +133,9 @@ sync-bundled.bat && npm run tauri build        # 完整：exe + NSIS 安装包
 **改了 `assets/bundled/` 里的应急组件后打包？**
 重跑 `sync-bundled.bat` 再 `npm run tauri build`。
 
+**游戏 exe 解压后消失了？**
+九成是杀毒软件干的：Windows Defender 等会实时隔离破解类启动器（误报常见）。Windows 安全中心 → 病毒和威胁防护 → 保护历史记录 → 找到被隔离项还原；并把输出目录加入排除列表后重新解压。工具本身不会删除解压出的文件（源目录只读、失败才移动）。
+
 **压缩包解出了一层还是压缩包？**
 正常：套娃结构（如 mp4→zip→SFX exe→7z 分卷）会逐层自动解到底，失败的层会留在原地并记警告，不会误删。
 

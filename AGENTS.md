@@ -15,7 +15,7 @@
 |---|---|---|---|
 | 纯改后缀（rar/zip 魔数在偏移 0 + 假扩展名） | 文件头魔数 | 直接解 | `sniff_all_archive_magics` |
 | 真封面图 + 追加 rar（多形体 jpg，如 PC15732.jpg） | 前缀 64MiB 窗找 rar 8 字节魔数 | 7z 原生支持前缀偏移，直接解 | `polyglot_cover_image_unwrapped` |
-| 完整 mp4 + 追加 zip/7z/xz（如 二小姐.mp4=56MiB 可播视频 + 733MB zip(1.exe) + 尾部小档；game.mp4 内装加密 zip 套 7z 分卷） | zip 走尾部 EOCD 反推起点（**允许 ≤16MiB 拖尾**，起点须 PK 验证）；7z/xz 走前缀窗，miss 再走尾部 64MiB 窗 | 按嵌入偏移**雕出**纯压缩档再解（7z 不做 SFX 校正） | `mp4_zip_with_trailing_data_extracted`、`zip_eocd_allows_small_trailing_junk`、`mp4_prefixed_zip_with_inner_7z_volumes_full_chain` |
+| 完整 mp4 + 追加 zip/7z/xz（如 二小姐.mp4=56MiB 可播视频 + 733MB zip(1.exe) + 尾部小档；game.mp4 内装加密 zip 套 7z 分卷；荒野独居 151/152=同一 875MB 视频头 + 数 GB zip 拖残破 EOCD 到文件尾） | zip 走尾部 EOCD 反推起点（**允许 ≤16MiB 拖尾**，起点须 PK 验证）；EOCD 被故意损坏时兜底走**本地头链识别**（沿 PK\x03\x04 链跟随，命中中央目录或连续 2 环即坐实；实测发布组为防网盘扫描损毁 EOCD，荒野独居 151/152 由此解开）；7z/xz 走前缀窗，miss 再走尾部 64MiB 窗 | 按嵌入偏移**雕出**纯压缩档再解（7z 不做 SFX 校正） | `mp4_zip_with_trailing_data_extracted`、`zip_eocd_allows_small_trailing_junk`、`mp4_prefixed_zip_with_inner_7z_volumes_full_chain`、`zip_broken_eocd_found_by_lfh_chain` |
 | 大媒体后追加 rar/7z/xz 到文件尾（超过前缀窗） | 尾部 64MiB 窗找长魔数，**必须过结构校验**（rar4/5 头类型+头长、7z StartHeaderCRC32、xz 流标志 CRC32；实测 12.6GB 真视频尾部有巧合 rar4 魔数，不校验会误移入失败目录） | 按偏移雕出（rar 前缀命中仍走原生不雕） | `tail_magic_validates_archive_structure`、`tail_magic_validates_7z_and_xz_headers` |
 | 垃圾前缀 + rar/7z/xz | 同上嵌入扫描 | 7z/xz 雕出；rar 原生 | `sniff_polyglot_cover_image_with_appended_archive` |
 | 数字卷名带尾标（`x.7z.001删`/`002旧`） | `match_num_vol_tail` 容忍 1-4 字节非 ASCII 尾标 | 正常分卷归集 | `renamed_first_volume_with_marker_reunited` |
@@ -30,7 +30,7 @@
 | 下载中半成品（`.qkdownloading`） | DOWNLOADING_SUFFIXES 跳过 | 不碰，源文件不动 | `pdf_is_ordinary_file_and_qkdownloading_skipped` |
 | 随包广告 PDF | `.pdf` 入黑名单 →「普通文件」 | 不告警（伪装 pdf 仍走魔数识别，**不排除**） | `pdf_named_disguised_archive_still_extracted` |
 
-已知缺口：SFX 的压缩档结构落在 overlay 1MiB 窗之外认不出（stub 超大）；zip 后拖尾 >16MiB 的 EOCD 认不出；尾部窗外（>64MiB）的超大追加档不参与；zip 后拖着的小 rar/7z 尾巴随 zip 雕出时被带进临时档、不参与单独解（内容本体在 zip 里，可接受）；gzip/bzip2/lz4/zstd 魔数太短不参与嵌入扫描；`.txt/.md/.log` 等文档后缀与 `.exe/.msi` 不启用嵌入识别（内容可能真含魔数字符串，误判会移入失败目录）。
+已知缺口：SFX 的压缩档结构落在 overlay 1MiB 窗之外认不出（stub 超大）；本地头链兜底只覆盖 zip（rar/7z 无等价廉价结构验证）；尾部窗外（>64MiB）的超大追加档不参与；zip 后拖着的小 rar/7z 尾巴随 zip 雕出时被带进临时档、不参与单独解（内容本体在 zip 里，可接受）；gzip/bzip2/lz4/zstd 魔数太短不参与嵌入扫描；`.txt/.md/.log` 等文档后缀与 `.exe/.msi` 不启用嵌入识别（内容可能真含魔数字符串，误判会移入失败目录）。
 
 ## 常用命令
 
