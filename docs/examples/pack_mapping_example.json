@@ -1,69 +1,174 @@
 {
   "generated_at": "2026-10-14",
-  "total_count": 3,
+  "total_count": 6,
   "mappings": [
     {
-      "source_name": "游戏本体",
+      "source_name": "动作冒险游戏 v1.0",
       "archive_name": "G001.7z",
-      "password": "aB3dEfGh5jKmNpQr",
+      "password": null,
       "source_size": {
-        "bytes": 524288000,
-        "mb": "500.00",
-        "gb": "0.488",
-        "human": "500.0 MB"
-      },
-      "compressed_size": {
-        "bytes": 456123456,
-        "mb": "435.07",
-        "gb": "0.425",
-        "human": "435.1 MB"
-      },
-      "compression_ratio": "87.0%",
-      "is_volume": false,
-      "volume_count": 1,
-      "created_at": "2026-10-14"
-    },
-    {
-      "source_name": "DLC合集",
-      "archive_name": "G002.7z.001",
-      "password": "xY9zAbCdEfGhJkMn",
-      "source_size": {
-        "bytes": 3221225472,
-        "mb": "3072.00",
-        "gb": "3.000",
-        "human": "3.0 GB"
+        "bytes": 5368709120,
+        "mb": "5120.00",
+        "gb": "5.00",
+        "human": "5.0 GB"
       },
       "compressed_size": {
         "bytes": 2684354560,
         "mb": "2560.00",
-        "gb": "2.500",
+        "gb": "2.50",
         "human": "2.5 GB"
       },
-      "compression_ratio": "83.3%",
-      "is_volume": true,
-      "volume_count": 2,
-      "created_at": "2026-10-14"
-    },
-    {
-      "source_name": "MOD整合包",
-      "archive_name": "G003.zip",
-      "password": null,
-      "source_size": {
-        "bytes": 157286400,
-        "mb": "150.00",
-        "gb": "0.146",
-        "human": "150.0 MB"
-      },
-      "compressed_size": {
-        "bytes": 125829120,
-        "mb": "120.00",
-        "gb": "0.117",
-        "human": "120.0 MB"
-      },
-      "compression_ratio": "80.0%",
+      "compression_ratio": "50.0%",
       "is_volume": false,
       "volume_count": 1,
-      "created_at": "2026-10-14"
+      "created_at": "2026-10-14",
+      "metadata": {
+        "version": "v1.0.2",
+        "engine": "Unity",
+        "is_apk": false,
+        "custom_tags": ["3D", "开放世界"],
+        "notes": "首发版本，含全部DLC"
+      }
+    },
+    {
+      "source_name": "RPG游戏完整版",
+      "archive_name": "G002.7z.001",
+      "password": "game123",
+      "source_size": {
+        "bytes": 10737418240,
+        "mb": "10240.00",
+        "gb": "10.00",
+        "human": "10.0 GB"
+      },
+      "compressed_size": {
+        "bytes": 7516192768,
+        "mb": "7168.00",
+        "gb": "7.00",
+        "human": "7.0 GB"
+      },
+      "compression_ratio": "70.0%",
+      "is_volume": true,
+      "volume_count": 4,
+      "created_at": "2026-10-13",
+      "metadata": {
+        "version": "v2.1.5",
+        "engine": "RPG Maker",
+        "is_apk": false,
+        "custom_tags": ["回合制", "剧情向"],
+        "notes": "包含汉化补丁和CG包"
+      }
+    },
+    {
+      "source_name": "射击游戏",
+      "archive_name": "G003.7z",
+      "password": null,
+      "source_size": {
+        "bytes": 8589934592,
+        "mb": "8192.00",
+        "gb": "8.00",
+        "human": "8.0 GB"
+      },
+      "compressed_size": {
+        "bytes": 4294967296,
+        "mb": "4096.00",
+        "gb": "4.00",
+        "human": "4.0 GB"
+      },
+      "compression_ratio": "50.0%",
+      "is_volume": false,
+      "volume_count": 1,
+      "created_at": "2026-10-12",
+      "metadata": {
+        "version": "v3.2.0",
+        "engine": "Unreal",
+        "is_apk": false,
+        "custom_tags": ["多人", "竞技"],
+        "notes": "最新赛季版本"
+      }
+    },
+    {
+      "source_name": "独立游戏合集",
+      "archive_name": "G004.zip",
+      "password": "indie2026",
+      "source_size": {
+        "bytes": 2147483648,
+        "mb": "2048.00",
+        "gb": "2.00",
+        "human": "2.0 GB"
+      },
+      "compressed_size": {
+        "bytes": 1288490189,
+        "mb": "1228.80",
+        "gb": "1.20",
+        "human": "1.2 GB"
+      },
+      "compression_ratio": "60.0%",
+      "is_volume": false,
+      "volume_count": 1,
+      "created_at": "2026-10-11",
+      "metadata": {
+        "version": "collection-2026",
+        "engine": "Godot",
+        "is_apk": false,
+        "custom_tags": ["像素", "休闲"],
+        "notes": "精选10款独立游戏"
+      }
+    },
+    {
+      "source_name": "手机游戏安装包",
+      "archive_name": "G005.7z",
+      "password": null,
+      "source_size": {
+        "bytes": 1073741824,
+        "mb": "1024.00",
+        "gb": "1.00",
+        "human": "1.0 GB"
+      },
+      "compressed_size": {
+        "bytes": 805306368,
+        "mb": "768.00",
+        "gb": "0.75",
+        "human": "768.0 MB"
+      },
+      "compression_ratio": "75.0%",
+      "is_volume": false,
+      "volume_count": 1,
+      "created_at": "2026-10-10",
+      "metadata": {
+        "version": "v1.5.3",
+        "engine": "Unity",
+        "is_apk": true,
+        "custom_tags": ["移动", "卡牌"],
+        "notes": "已解包，含数据包"
+      }
+    },
+    {
+      "source_name": "自研引擎 Demo",
+      "archive_name": "G006.7z.001",
+      "password": "demo123",
+      "source_size": {
+        "bytes": 3221225472,
+        "mb": "3072.00",
+        "gb": "3.00",
+        "human": "3.0 GB"
+      },
+      "compressed_size": {
+        "bytes": 1610612736,
+        "mb": "1536.00",
+        "gb": "1.50",
+        "human": "1.5 GB"
+      },
+      "compression_ratio": "50.0%",
+      "is_volume": true,
+      "volume_count": 2,
+      "created_at": "2026-10-09",
+      "metadata": {
+        "version": "demo-v0.8",
+        "engine": "自研",
+        "is_apk": false,
+        "custom_tags": ["测试版", "技术演示"],
+        "notes": "早期开发版本"
+      }
     }
   ]
 }

@@ -1,9 +1,14 @@
 # 自动解压工具（Rust + Tauri）
 
-Windows 桌面工具，解决两个下载党日常痛点：
+Windows 桌面工具，解决三个下载党日常痛点：
 
 1. **带密码的压缩包不用到处翻密码**。平时把常用密码存进密码库（发布页看到的随手加进去），下载完成后一键解压——工具自动按密码库逐个尝试，命中的还会置顶记忆，下次更快。再也不用在「文件提供者发布页 → 聊天记录 → 便签」之间来回找密码。
 2. **打包发布一站搞定**。批量把文件/目录打成加密压缩包，命名从 `G198` 这类起点自动递增（宽度保留，Z999→Z1000），超过阈值自动分卷，每个包混入内容唯一的 `资源说明.txt`（防网盘按 hash 秒传比对），方便用包名快速索引。
+3. **游戏库管理可视化** ✨。打包后自动生成 `pack_mapping.json`，在游戏库管理页面可以：
+   - 查看所有压缩包的统计信息（大小、压缩率、分卷数）
+   - 手动标记版本号、引擎类型（Unity/Unreal/RPG Maker 等）、是否 APK
+   - 实时搜索和筛选，按名称/大小/压缩率/日期排序
+   - 自动保存元数据（含备份），长期管理游戏资源
 
 技术上是个 Rust 核心库（`unzip-core`，纯逻辑无 UI）+ 命令行（`unzip-cli`）+ Tauri v2 + Vue 3 桌面应用。核心能力是**按内容魔数识别文件**，所以发布组各种伪装手法都能认出来直接解。
 
@@ -32,14 +37,22 @@ unzip-rs/
 │   ├── unzip-core/      # 核心库：解压 pipeline + 打包 pack 模块（纯逻辑，无 UI 依赖）
 │   └── unzip-cli/       # 命令行（解压 + pack 子命令）
 ├── app/                 # Tauri 桌面应用（Vue 3 前端在 app/src，Rust 外壳在 app/src-tauri）
-│   ├── src/components/  #   UnpackView.vue（解压页）、PackView.vue（打包页），App.vue 为页签壳
+│   ├── src/
+│   │   ├── components/  #   UnpackView.vue（解压页）、PackView.vue（打包页）、
+│   │   │                #   LibraryView.vue（游戏库管理）✨、GameCard.vue（游戏卡片）✨、
+│   │   │                #   ThemeSettings.vue（主题设置）✨
+│   │   ├── composables/ #   useTheme.ts（壁纸系统和自动取色）✨
+│   │   ├── styles/      #   glassmorphism.css（毛玻璃风格全局样式）✨
+│   │   └── types.ts     #   类型定义（含 GameMetadata）
 │   ├── src-tauri/       #   Tauri 外壳（命令、事件、配置迁移）
 │   └── sync-bundled.bat #   把应急组件同步进打包资源（构建安装包前必跑）
 ├── assets/bundled/      # 内置 7z.exe/7z.dll（7-Zip 26.03）、UnRAR.exe 及许可证（git 跟踪）
 └── docs/
     ├── AGENTS.md        # 给协作者/AI 的详细约定（含伪装手法识别速查表与全部测试锚点），改代码前必读
     ├── PACK_MAPPING.md  # 打包映射功能文档
-    └── examples/        # 示例文件
+    ├── UI_REDESIGN.md   # UI 重构报告（毛玻璃风格 + 游戏库管理）✨
+    └── examples/
+        └── pack_mapping_example.json  # 游戏库示例数据
 ```
 
 ## 环境要求
