@@ -8,6 +8,7 @@ import {
   fmtSize,
   nextName,
   sanitizeName,
+  savePackOptions,
   type PackSummaryPayload,
 } from "../types";
 
@@ -148,6 +149,12 @@ function onDone(s: PackSummaryPayload) {
   for (const w of s.warns) {
     appendLog(`警告：${w}`, "warn");
   }
+
+  // 保存成功的配置（记住目录、密码、模板等）
+  if (s.ok.length > 0) {
+    savePackOptions(opts);
+  }
+
   nextTick(() => {
     const el = logBox.value;
     if (el) el.scrollTop = el.scrollHeight;

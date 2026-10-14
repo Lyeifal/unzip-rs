@@ -629,56 +629,116 @@ fn fmt_gb(gb: f64) -> String {
 }
 
 /// 生成 JSON 映射文件：记录源文件名 → 压缩包名的对应关系。
+/// 支持增量更新：按 archive_name 去重，新包覆盖同名旧包。
 fn write_mapping_json(
     out_dir: &Path,
     results: &[PackResult],
     cb: &dyn RunCallback,
 ) -> Result<(), String> {
-    let mapping: Vec<_> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "source_name": r.source_name,
-                "archive_name": format!("{}.{}", r.name, if r.outputs.first()
-                    .and_then(|p| p.extension())
-                    .and_then(|e| e.to_str())
-                    .map(|e| e == "001")
-                    .unwrap_or(false) {
-                    // 分卷：取第一个文件的完整扩展名（如 7z.001）
-                    r.outputs.first()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| n.strip_prefix(&format!("{}.", r.name)))
-                        .unwrap_or("7z")
-                } else {
-                    // 单卷：取扩展名
-                    r.outputs.first()
-                        .and_then(|p| p.extension())
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("7z")
-                }),
-                "password": r.password,
-                "size_bytes": r.size_bytes,
-                "size_human": fmt_size(r.size_bytes),
-                "is_volume": r.outputs.len() > 1,
-                "volume_count": r.outputs.len(),
-            })
-        })
-        .collect();
+    let json_path = out_dir.join("pack_mapping.json");
+
+    // 读取旧映射（如果存在）
+    let mut existing_map: std::collections::HashMap<String, serde_json::Value> =
+        if json_path.exists() {
+            fs::read_to_string(&json_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("mappings").cloned())
+                .and_then(|m| m.as_array().cloned())
+                .map(|arr| {
+                    arr.into_iter()
+                        .filter_map(|item| {
+                            let name = item.get("archive_name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string());
+                            name.map(|n| (n, item))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // 新包：覆盖同名旧包
+    for r in results {
+        let archive_name = format!("{}.{}", r.name, if r.outputs.first()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map(|e| e == "001")
+            .unwrap_or(false) {
+            r.outputs.first()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix(&format!("{}.", r.name)))
+                .unwrap_or("7z")
+        } else {
+            r.outputs.first()
+                .and_then(|p| p.extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("7z")
+        });
+
+        // 计算压缩后大小（所有分卷总和）
+        let compressed_bytes: u64 = r.outputs.iter()
+            .filter_map(|p| p.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+
+        let item = json!({
+            "source_name": r.source_name,
+            "archive_name": archive_name,
+            "password": r.password,
+            "source_size": {
+                "bytes": r.size_bytes,
+                "mb": format!("{:.2}", r.size_bytes as f64 / (1024.0 * 1024.0)),
+                "gb": format!("{:.3}", r.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0)),
+                "human": fmt_size(r.size_bytes),
+            },
+            "compressed_size": {
+                "bytes": compressed_bytes,
+                "mb": format!("{:.2}", compressed_bytes as f64 / (1024.0 * 1024.0)),
+                "gb": format!("{:.3}", compressed_bytes as f64 / (1024.0 * 1024.0 * 1024.0)),
+                "human": fmt_size(compressed_bytes),
+            },
+            "compression_ratio": if r.size_bytes > 0 {
+                format!("{:.1}%", compressed_bytes as f64 / r.size_bytes as f64 * 100.0)
+            } else {
+                "0%".to_string()
+            },
+            "is_volume": r.outputs.len() > 1,
+            "volume_count": r.outputs.len(),
+            "created_at": chrono_like_today(),
+        });
+
+        existing_map.insert(archive_name, item);
+    }
+
+    // 按 archive_name 排序
+    let mut mappings: Vec<_> = existing_map.into_values().collect();
+    mappings.sort_by(|a, b| {
+        let name_a = a.get("archive_name").and_then(|v| v.as_str()).unwrap_or("");
+        let name_b = b.get("archive_name").and_then(|v| v.as_str()).unwrap_or("");
+        name_a.cmp(name_b)
+    });
 
     let json_content = serde_json::to_string_pretty(&json!({
         "generated_at": chrono_like_today(),
-        "total_count": results.len(),
-        "mappings": mapping,
+        "total_count": mappings.len(),
+        "mappings": mappings,
     }))
     .map_err(|e| format!("序列化 JSON 失败：{e}"))?;
 
-    let json_path = out_dir.join("pack_mapping.json");
     fs::write(&json_path, json_content)
         .map_err(|e| format!("写入 JSON 文件失败：{e}"))?;
 
+    let action = if results.len() == mappings.len() {
+        "已生成"
+    } else {
+        "已更新"
+    };
     cb.on_log(
-        &format!("[完成] 已生成映射文件：{}", json_path.display()),
+        &format!("[完成] {action}映射文件：{}（共 {} 项）", json_path.display(), mappings.len()),
         LogLevel::Ok,
     );
     Ok(())

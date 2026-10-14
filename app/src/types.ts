@@ -77,6 +77,30 @@ export interface PackOptions {
 }
 
 export function defaultPackOptions(): PackOptions {
+  // 尝试从 localStorage 加载上次的配置
+  const saved = localStorage.getItem("pack_options");
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      // 合并默认值，确保新增字段有默认值
+      return {
+        format: parsed.format || "7z",
+        password_mode: parsed.password_mode || "random_per_pack",
+        uniform_password: parsed.uniform_password || "",
+        volume_threshold_gb: parsed.volume_threshold_gb ?? 3,
+        volume_size_gb: parsed.volume_size_gb ?? 2,
+        name_start: parsed.name_start || "G001",
+        name_step: parsed.name_step ?? 1,
+        mix_txt: parsed.mix_txt ?? true,
+        txt_template: parsed.txt_template || "本资源于 {date} 打包整理，解压密码请查看发布页面。",
+        compression_level: parsed.compression_level ?? 5,
+        output_dir: parsed.output_dir || "",
+      };
+    } catch {
+      // 解析失败，返回默认值
+    }
+  }
+
   return {
     format: "7z",
     password_mode: "random_per_pack",
@@ -90,6 +114,15 @@ export function defaultPackOptions(): PackOptions {
     compression_level: 5,
     output_dir: "",
   };
+}
+
+// 保存打包配置到 localStorage
+export function savePackOptions(opts: PackOptions): void {
+  try {
+    localStorage.setItem("pack_options", JSON.stringify(opts));
+  } catch (e) {
+    console.error("保存打包配置失败：", e);
+  }
 }
 
 // 后端 pack-done 事件载荷。
