@@ -1,0 +1,27 @@
+# 自动规范化行尾
+* text=auto
+
+# Windows 批处理文件使用 CRLF
+*.bat text eol=crlf
+
+# 文档文件使用 CRLF（主目标平台是 Windows）
+*.md text eol=crlf
+
+# Rust 代码使用 LF
+*.rs text eol=lf
+*.toml text eol=lf
+
+# Web 前端文件使用 LF
+*.js text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+
+# 二进制文件
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.ico binary
