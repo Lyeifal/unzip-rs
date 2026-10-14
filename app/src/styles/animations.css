@@ -1,0 +1,265 @@
+/**
+ * 动画效果
+ */
+
+/* ========== 卡片入场动画 ========== */
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.card-enter {
+  animation: cardEnter 0.4s ease-out backwards;
+}
+
+/* 延迟入场（用于列表） */
+.card-enter:nth-child(1) {
+  animation-delay: 0.05s;
+}
+.card-enter:nth-child(2) {
+  animation-delay: 0.1s;
+}
+.card-enter:nth-child(3) {
+  animation-delay: 0.15s;
+}
+.card-enter:nth-child(4) {
+  animation-delay: 0.2s;
+}
+.card-enter:nth-child(5) {
+  animation-delay: 0.25s;
+}
+.card-enter:nth-child(6) {
+  animation-delay: 0.3s;
+}
+.card-enter:nth-child(7) {
+  animation-delay: 0.35s;
+}
+.card-enter:nth-child(8) {
+  animation-delay: 0.4s;
+}
+.card-enter:nth-child(9) {
+  animation-delay: 0.45s;
+}
+
+/* ========== 发光脉冲 ========== */
+
+@keyframes glow {
+  0%,
+  100% {
+    box-shadow: 0 0 10px var(--primary-glow);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--primary-glow);
+  }
+}
+
+.glow-pulse {
+  animation: glow 2s ease-in-out infinite;
+}
+
+/* ========== 旋转加载 ========== */
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ========== 淡入淡出 ========== */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.fade-in {
+  animation: fadeIn var(--transition-normal) ease;
+}
+
+.fade-out {
+  animation: fadeOut var(--transition-normal) ease;
+}
+
+/* ========== 滑入滑出 ========== */
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideOutUp {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+}
+
+.slide-in-down {
+  animation: slideInDown var(--transition-normal) ease;
+}
+
+.slide-out-up {
+  animation: slideOutUp var(--transition-normal) ease;
+}
+
+/* ========== 弹跳 ========== */
+
+@keyframes bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.bounce {
+  animation: bounce 0.6s ease;
+}
+
+/* ========== 进度条动画 ========== */
+
+@keyframes progressPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 10px currentColor, 0 0 20px currentColor,
+      inset 0 0 10px rgba(255, 255, 255, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 15px currentColor, 0 0 30px currentColor,
+      inset 0 0 15px rgba(255, 255, 255, 0.5);
+  }
+}
+
+.progress-pulse {
+  animation: progressPulse 2s ease-in-out infinite;
+}
+
+/* ========== 涟漪效果 ========== */
+
+@keyframes ripple {
+  from {
+    transform: scale(0);
+    opacity: 1;
+  }
+  to {
+    transform: scale(4);
+    opacity: 0;
+  }
+}
+
+.ripple-effect {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple-effect::after {
+  content: "";
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.ripple-effect:active::after {
+  animation: ripple 0.6s ease-out;
+}
+
+/* ========== 缩放动画 ========== */
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes scaleOut {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+.scale-in {
+  animation: scaleIn var(--transition-normal) ease;
+}
+
+.scale-out {
+  animation: scaleOut var(--transition-normal) ease;
+}
+
+/* ========== 摇晃动画（用于错误提示） ========== */
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  10%,
+  30%,
+  50%,
+  70%,
+  90% {
+    transform: translateX(-5px);
+  }
+  20%,
+  40%,
+  60%,
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+.shake {
+  animation: shake 0.5s ease;
+}

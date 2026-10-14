@@ -1,34 +1,158 @@
 <script setup lang="ts">
-import "./styles.css";
-import { ref } from "vue";
+// 导入新样式
+import "./styles/themes.css";
+import "./styles/glassmorphism.css";
+import "./styles/animations.css";
+
+import { onMounted, ref } from "vue";
+import { useTheme } from "./composables/useTheme";
 import UnpackView from "./components/UnpackView.vue";
 import PackView from "./components/PackView.vue";
 
-// 两页卡片切换；KeepAlive 保持各自状态（日志、列表、配置不丢）。
-const tab = ref<"unpack" | "pack">("unpack");
+// TODO: 等实现后导入
+// import LibraryView from "./components/LibraryView.vue";
+// import ThemeSettings from "./components/ThemeSettings.vue";
+
+// 当前标签页
+type TabType = "unpack" | "pack" | "library";
+const tab = ref<TabType>("unpack");
+
+// 主题设置面板
+const showSettings = ref(false);
+
+// 初始化主题
+const theme = useTheme();
+onMounted(() => {
+  theme.init();
+});
 </script>
 
 <template>
-  <div class="root">
-    <div class="tabs">
+  <div class="app-container">
+    <!-- 顶部标题栏 -->
+    <div class="app-header">
+      <h1 class="app-title">
+        <span class="title-icon">🎮</span>
+        自动解压工具
+      </h1>
+      <button class="btn-glass settings-btn" @click="showSettings = !showSettings">
+        <span>⚙️</span>
+      </button>
+    </div>
+
+    <!-- 标签页（毛玻璃风格） -->
+    <div class="tabs-glass">
       <button
-        class="tab"
+        class="tab-glass"
         :class="{ active: tab === 'unpack' }"
         @click="tab = 'unpack'"
       >
-        自动解压
+        📦 自动解压
       </button>
       <button
-        class="tab"
+        class="tab-glass"
         :class="{ active: tab === 'pack' }"
         @click="tab = 'pack'"
       >
-        打包压缩
+        🗜️ 打包压缩
+      </button>
+      <button
+        class="tab-glass"
+        :class="{ active: tab === 'library' }"
+        @click="tab = 'library'"
+      >
+        📚 游戏库管理
       </button>
     </div>
+
+    <!-- 页面内容（KeepAlive 保持状态） -->
     <KeepAlive>
       <UnpackView v-if="tab === 'unpack'" />
-      <PackView v-else />
+      <PackView v-else-if="tab === 'pack'" />
+      <div v-else class="glass-card" style="padding: 40px; text-align: center">
+        <h2>🚧 游戏库管理</h2>
+        <p style="margin-top: 16px; color: var(--text-secondary)">
+          即将推出...
+        </p>
+      </div>
     </KeepAlive>
+
+    <!-- 主题设置面板（TODO: 等实现后启用） -->
+    <!-- <ThemeSettings v-if="showSettings" @close="showSettings = false" /> -->
+    <div
+      v-if="showSettings"
+      class="settings-placeholder glass-card"
+      @click="showSettings = false"
+    >
+      <div class="settings-content" @click.stop>
+        <h3>⚙️ 主题设置</h3>
+        <p style="margin-top: 16px; color: var(--text-secondary)">
+          壁纸上传和取色器功能即将推出...
+        </p>
+        <button class="btn-glass mt-lg" @click="showSettings = false">
+          关闭
+        </button>
+      </div>
+    </div>
   </div>
 </template>
+
+<style scoped>
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.app-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+}
+
+.title-icon {
+  font-size: 32px;
+  filter: drop-shadow(0 0 10px var(--primary-glow));
+}
+
+.settings-btn {
+  padding: 10px 16px;
+  font-size: 20px;
+}
+
+.settings-placeholder {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.3s ease;
+}
+
+.settings-content {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+  max-width: 400px;
+  text-align: center;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+  animation: scaleIn 0.3s ease;
+}
+
+.settings-content h3 {
+  font-size: 20px;
+  color: var(--text-primary);
+  margin: 0;
+}
+</style>
+

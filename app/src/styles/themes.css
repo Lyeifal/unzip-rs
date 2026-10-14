@@ -1,0 +1,66 @@
+/**
+ * 主题变量定义
+ * CSS 变量可通过 JavaScript 动态修改
+ */
+
+:root {
+  /* 主色系（默认青蓝色，可通过壁纸取色动态修改） */
+  --primary: #00d9ff;
+  --primary-light: #33e4ff;
+  --primary-dark: #00a8cc;
+  --primary-glow: rgba(0, 217, 255, 0.5);
+
+  --secondary: #5b9fff;
+  --accent: #ffb638;
+
+  /* 背景色 */
+  --bg-dark: #1a1a2e;
+  --bg-darker: #0f0f1a;
+
+  /* 文字颜色 */
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.7);
+  --text-tertiary: rgba(255, 255, 255, 0.5);
+
+  /* 功能色 */
+  --success: #00ffb3;
+  --warning: #ffd60a;
+  --error: #ff375f;
+
+  /* 引擎标签颜色 */
+  --engine-unity: #44d62c;
+  --engine-unreal: #5b9fff;
+  --engine-rpgmaker: #ff6b9d;
+  --engine-godot: #478cbf;
+  --engine-custom: #ffb638;
+  --engine-other: #b4bec8;
+
+  /* 毛玻璃效果 */
+  --glass-bg: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.18);
+  --glass-shadow: rgba(0, 0, 0, 0.2);
+
+  /* 壁纸相关（由 JavaScript 设置） */
+  --user-wallpaper: none;
+  --wallpaper-blur: 0px;
+  --wallpaper-darkness: 0.4;
+
+  /* 动画时间 */
+  --transition-fast: 0.15s;
+  --transition-normal: 0.3s;
+  --transition-slow: 0.5s;
+
+  /* 圆角 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* 间距 */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 24px;
+}
