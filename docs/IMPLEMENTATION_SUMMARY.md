@@ -47,9 +47,9 @@
   - 所有字段的准确性
 
 ### 3. 文档
-- `AGENTS.md` - 在"打包压缩"章节添加映射文件说明
-- `PACK_MAPPING.md` - 完整的功能说明文档
-- `pack_mapping_example.json` - 示例文件
+- `docs/AGENTS.md` - 在"打包压缩"章节添加映射文件说明
+- `docs/PACK_MAPPING.md` - 完整的功能说明文档
+- `docs/examples/pack_mapping_example.json` - 示例文件
 
 ## 技术细节
 
@@ -169,12 +169,12 @@ for item in data['mappings']:
 
 修改的文件：
 - `crates/unzip-core/src/pack.rs` - 核心实现
-- `AGENTS.md` - 文档更新
+- `docs/AGENTS.md` - 文档更新
 
 新增的文件：
-- `PACK_MAPPING.md` - 功能说明文档
-- `pack_mapping_example.json` - 示例文件
-- `IMPLEMENTATION_SUMMARY.md` - 本文件
+- `docs/PACK_MAPPING.md` - 功能说明文档
+- `docs/examples/pack_mapping_example.json` - 示例文件
+- `docs/IMPLEMENTATION_SUMMARY.md` - 本文件
 
 ## 结论
 

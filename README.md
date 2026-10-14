@@ -36,7 +36,10 @@ unzip-rs/
 │   ├── src-tauri/       #   Tauri 外壳（命令、事件、配置迁移）
 │   └── sync-bundled.bat #   把应急组件同步进打包资源（构建安装包前必跑）
 ├── assets/bundled/      # 内置 7z.exe/7z.dll（7-Zip 26.03）、UnRAR.exe 及许可证（git 跟踪）
-└── AGENTS.md            # 给协作者/AI 的详细约定（含伪装手法识别速查表与全部测试锚点），改代码前必读
+└── docs/
+    ├── AGENTS.md        # 给协作者/AI 的详细约定（含伪装手法识别速查表与全部测试锚点），改代码前必读
+    ├── PACK_MAPPING.md  # 打包映射功能文档
+    └── examples/        # 示例文件
 ```
 
 ## 环境要求

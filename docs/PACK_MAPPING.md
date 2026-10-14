@@ -120,4 +120,4 @@ foreach ($mapping in $json.mappings) {
 
 ## 完整示例
 
-参见项目根目录的 `pack_mapping_example.json` 文件。
+参见项目 `docs/examples/pack_mapping_example.json` 文件。
