@@ -283,6 +283,387 @@ body.wallpaper-loaded::after {
   box-shadow: 0 0 20px var(--primary-glow);
 }
 
+/* ========== 页面布局 ========== */
+
+.page-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section-card {
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary);
+  margin: 0 0 16px;
+}
+
+/* ========== 表单行 ========== */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.lbl {
+  flex: 0 0 auto;
+  min-width: 150px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.hint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  margin: 4px 0 0 150px;
+}
+
+/* ========== 列表 ========== */
+
+.split {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.list {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.list li {
+  padding: 8px 12px;
+  cursor: default;
+  user-select: none;
+  transition: background 0.2s ease;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.list li:last-child {
+  border-bottom: none;
+}
+
+.list li:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.list li.sel {
+  background: rgba(var(--primary), 0.2);
+  border-left: 3px solid var(--primary);
+}
+
+.list li.item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.list li.item .src {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.list li.item .pack-name {
+  flex: 0 0 auto;
+  color: var(--primary);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.btns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.btns .btn-glass {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+.btns-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* ========== 运行状态 ========== */
+
+.run-row {
+  margin-top: 16px;
+}
+
+.current {
+  flex: 1;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.bar {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  height: 20px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+
+.bar-inner {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), var(--primary-dark));
+  border-radius: 9px;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 10px var(--primary-glow);
+}
+
+/* ========== 日志视图 ========== */
+
+.log-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+}
+
+.log-view {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 12px;
+  overflow-y: auto;
+  min-height: 200px;
+  max-height: 400px;
+  line-height: 1.6;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.lv-ok {
+  color: var(--success);
+}
+
+.lv-error {
+  color: var(--error);
+}
+
+.lv-warn {
+  color: var(--warning);
+}
+
+.lv-skip {
+  color: var(--text-tertiary);
+}
+
+.lv-info {
+  color: var(--text-secondary);
+}
+
+/* ========== 汇总结果 ========== */
+
+.summary {
+  margin-top: 16px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+}
+
+.sum-head {
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+
+.sum-line {
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.sum-close {
+  margin-top: 12px;
+  padding: 6px 16px;
+  font-size: 13px;
+}
+
+/* ========== 结果表格 ========== */
+
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+.result-table th,
+.result-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.result-table th {
+  color: var(--primary);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.result-table td.mono {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.copy-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+/* ========== 弹窗 ========== */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn 0.3s ease;
+}
+
+.dialog {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 460px;
+  max-width: 92vw;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+  animation: scaleIn 0.3s ease;
+}
+
+.dlg-title {
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 16px;
+  margin-bottom: 16px;
+}
+
+.dlg-btns {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.dlg-err {
+  color: var(--error);
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+/* ========== 高级选项 ========== */
+
+.adv summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 8px 0;
+  user-select: none;
+}
+
+.adv summary:hover {
+  color: var(--text-primary);
+}
+
+.adv[open] summary {
+  margin-bottom: 12px;
+}
+
+/* ========== 单选按钮组 ========== */
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 12px 0;
+}
+
+.radio-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: color 0.2s ease;
+}
+
+.radio-row label:hover {
+  color: var(--text-primary);
+}
+
+.radio-row input[type="radio"] {
+  cursor: pointer;
+}
+
+/* ========== 数字输入框 ========== */
+
+.num {
+  flex: 0 0 80px;
+}
+
+input[type="number"].input-glass {
+  text-align: center;
+}
+
+/* ========== 滚动条美化 ========== */
+
+.list::-webkit-scrollbar,
+.log-view::-webkit-scrollbar {
+  width: 8px;
+}
+
+.list::-webkit-scrollbar-track,
+.log-view::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.list::-webkit-scrollbar-thumb,
+.log-view::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.list::-webkit-scrollbar-thumb:hover,
+.log-view::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 /* ========== 通用工具类 ========== */
 
 .flex {

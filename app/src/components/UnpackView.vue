@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import "../styles.css";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -285,22 +284,22 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page-content">
     <h1 class="title">自动解压工具</h1>
 
     <!-- 目录设置 -->
-    <section class="group">
-      <div class="group-title">目录设置</div>
+    <section class="glass-card section-card">
+      <div class="section-title">目录设置</div>
       <div v-for="row in dirRows" :key="row.key" class="row">
         <label class="lbl">{{ row.label }}</label>
-        <input v-model="cfg[row.key]" class="input" :placeholder="row.hint" />
-        <button class="btn" @click="browseDir(row.key)">浏览…</button>
+        <input v-model="cfg[row.key]" class="input-glass" :placeholder="row.hint" />
+        <button class="btn-glass" @click="browseDir(row.key)">浏览…</button>
       </div>
     </section>
 
     <!-- 密码库 -->
-    <section class="group">
-      <div class="group-title">密码库（自上而下依次尝试）</div>
+    <section class="glass-card section-card">
+      <div class="section-title">密码库（自上而下依次尝试）</div>
       <div class="split">
         <ul class="list" @click="pwSel = -1">
           <li
@@ -313,17 +312,17 @@ onUnmounted(() => {
           </li>
         </ul>
         <div class="btns">
-          <button class="btn" @click="pwAdd">添加</button>
-          <button class="btn" :disabled="pwSel < 0" @click="pwDel">删除</button>
-          <button class="btn" :disabled="pwSel < 0" @click="pwMove(-1)">上移</button>
-          <button class="btn" :disabled="pwSel < 0" @click="pwMove(1)">下移</button>
+          <button class="btn-glass" @click="pwAdd">添加</button>
+          <button class="btn-glass" :disabled="pwSel < 0" @click="pwDel">删除</button>
+          <button class="btn-glass" :disabled="pwSel < 0" @click="pwMove(-1)">上移</button>
+          <button class="btn-glass" :disabled="pwSel < 0" @click="pwMove(1)">下移</button>
         </div>
       </div>
     </section>
 
     <!-- 密码策略规则 -->
-    <section class="group">
-      <div class="group-title">
+    <section class="glass-card section-card">
+      <div class="section-title">
         密码策略规则（命中的规则优先尝试，未命中走上方密码库顺序）
       </div>
       <div class="split">
@@ -338,11 +337,11 @@ onUnmounted(() => {
           </li>
         </ul>
         <div class="btns">
-          <button class="btn" @click="ruleOpen(-1)">添加</button>
-          <button class="btn" :disabled="ruleSel < 0" @click="ruleOpen(ruleSel)">编辑</button>
-          <button class="btn" :disabled="ruleSel < 0" @click="ruleDel">删除</button>
-          <button class="btn" :disabled="ruleSel < 0" @click="ruleMove(-1)">上移</button>
-          <button class="btn" :disabled="ruleSel < 0" @click="ruleMove(1)">下移</button>
+          <button class="btn-glass" @click="ruleOpen(-1)">添加</button>
+          <button class="btn-glass" :disabled="ruleSel < 0" @click="ruleOpen(ruleSel)">编辑</button>
+          <button class="btn-glass" :disabled="ruleSel < 0" @click="ruleDel">删除</button>
+          <button class="btn-glass" :disabled="ruleSel < 0" @click="ruleMove(-1)">上移</button>
+          <button class="btn-glass" :disabled="ruleSel < 0" @click="ruleMove(1)">下移</button>
         </div>
       </div>
     </section>
@@ -361,19 +360,19 @@ onUnmounted(() => {
       <summary class="group-title adv-title">高级设置</summary>
       <div v-for="row in fileRows" :key="row.key" class="row">
         <label class="lbl">{{ row.label }}</label>
-        <input v-model="cfg[row.key]" class="input" />
-        <button class="btn" @click="browseFile(row.key)">浏览…</button>
+        <input v-model="cfg[row.key]" class="input-glass" />
+        <button class="btn-glass" @click="browseFile(row.key)">浏览…</button>
       </div>
       <div class="row">
         <label class="lbl">产物后缀（不解压，原样放入）</label>
-        <input v-model="productExtsText" class="input" />
+        <input v-model="productExtsText" class="input-glass" />
       </div>
     </details>
 
     <!-- 运行 -->
     <div class="row run-row">
-      <button class="btn accent" :disabled="running" @click="start">开始解压</button>
-      <button class="btn danger" :disabled="!running" @click="stop">停止</button>
+      <button class="btn-glass btn-primary" :disabled="running" @click="start">开始解压</button>
+      <button class="btn-glass btn-danger" :disabled="!running" @click="stop">停止</button>
       <span class="current">{{ current }}</span>
     </div>
 
@@ -386,7 +385,7 @@ onUnmounted(() => {
 
     <!-- 运行日志 -->
     <section class="group log-group">
-      <div class="group-title">运行日志</div>
+      <div class="section-title">运行日志</div>
       <div ref="logBox" class="log-view">
         <div v-for="(l, i) in logs" :key="i" class="log-line" :class="'lv-' + l.level">
           {{ l.msg }}
@@ -415,14 +414,14 @@ onUnmounted(() => {
           <label class="lbl">输入常用密码：</label>
           <input
             v-model="pwInput"
-            class="input"
+            class="input-glass"
             autofocus
             @keyup.enter="pwAddOk"
           />
         </div>
         <div class="row dlg-btns">
-          <button class="btn accent" @click="pwAddOk">确定</button>
-          <button class="btn" @click="pwDlg = false">取消</button>
+          <button class="btn-glass btn-primary" @click="pwAddOk">确定</button>
+          <button class="btn-glass" @click="pwDlg = false">取消</button>
         </div>
       </div>
     </div>
@@ -442,7 +441,7 @@ onUnmounted(() => {
           <label class="lbl">条件值</label>
           <input
             v-model="ruleValue"
-            class="input"
+            class="input-glass"
             :placeholder="ruleKind === 'suffix' ? '.lz4（后缀）' : '如 游戏、汉化、整合'"
           />
         </div>
@@ -450,15 +449,15 @@ onUnmounted(() => {
           <label class="lbl">优先密码</label>
           <input
             v-model="rulePws"
-            class="input"
+            class="input-glass"
             placeholder="多个密码用逗号或空格分隔，按顺序优先尝试"
             @keyup.enter="ruleOk"
           />
         </div>
         <div v-if="ruleErr" class="dlg-err">{{ ruleErr }}</div>
         <div class="row dlg-btns">
-          <button class="btn accent" @click="ruleOk">确定</button>
-          <button class="btn" @click="ruleDlg = false">取消</button>
+          <button class="btn-glass btn-primary" @click="ruleOk">确定</button>
+          <button class="btn-glass" @click="ruleDlg = false">取消</button>
         </div>
       </div>
     </div>
