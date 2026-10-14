@@ -8,10 +8,10 @@ import { onMounted, ref } from "vue";
 import { useTheme } from "./composables/useTheme";
 import UnpackView from "./components/UnpackView.vue";
 import PackView from "./components/PackView.vue";
+import ThemeSettings from "./components/ThemeSettings.vue";
 
 // TODO: 等实现后导入
 // import LibraryView from "./components/LibraryView.vue";
-// import ThemeSettings from "./components/ThemeSettings.vue";
 
 // 当前标签页
 type TabType = "unpack" | "pack" | "library";
@@ -77,23 +77,8 @@ onMounted(() => {
       </div>
     </KeepAlive>
 
-    <!-- 主题设置面板（TODO: 等实现后启用） -->
-    <!-- <ThemeSettings v-if="showSettings" @close="showSettings = false" /> -->
-    <div
-      v-if="showSettings"
-      class="settings-placeholder glass-card"
-      @click="showSettings = false"
-    >
-      <div class="settings-content" @click.stop>
-        <h3>⚙️ 主题设置</h3>
-        <p style="margin-top: 16px; color: var(--text-secondary)">
-          壁纸上传和取色器功能即将推出...
-        </p>
-        <button class="btn-glass mt-lg" @click="showSettings = false">
-          关闭
-        </button>
-      </div>
-    </div>
+    <!-- 主题设置面板 -->
+    <ThemeSettings v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 
@@ -123,36 +108,6 @@ onMounted(() => {
 .settings-btn {
   padding: 10px 16px;
   font-size: 20px;
-}
-
-.settings-placeholder {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(8px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: fadeIn 0.3s ease;
-}
-
-.settings-content {
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  padding: 32px;
-  max-width: 400px;
-  text-align: center;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
-  animation: scaleIn 0.3s ease;
-}
-
-.settings-content h3 {
-  font-size: 20px;
-  color: var(--text-primary);
-  margin: 0;
 }
 </style>
 
