@@ -415,10 +415,38 @@ fn pack_one(
         return Err(format!("7z 打包失败：{tail}"));
     }
 
-    let outputs = collect_outputs(&out_dir, &final_name, &opts.format);
+    let mut outputs = collect_outputs(&out_dir, &final_name, &opts.format);
     if outputs.is_empty() {
         return Err("打包未产出任何文件".to_string());
     }
+
+    // 优化：启用了分卷但实际只生成一个文件（压缩后小于分卷大小）时，去掉 .001 后缀
+    if outputs.len() == 1 {
+        let single = &outputs[0];
+        if let Some(fname) = single.file_name().and_then(|n| n.to_str()) {
+            // 检查是否为 {name}.{format}.001 形态
+            let expected_vol = format!("{}.{}.001", final_name, opts.format);
+            if fname == expected_vol {
+                let target = out_dir.join(format!("{}.{}", final_name, opts.format));
+                match fs::rename(single, &target) {
+                    Ok(_) => {
+                        outputs[0] = target;
+                        cb.on_log(
+                            &format!("[优化] 单文件分卷已重命名为 {}.{}", final_name, opts.format),
+                            LogLevel::Info,
+                        );
+                    }
+                    Err(e) => {
+                        cb.on_log(
+                            &format!("[警告] 重命名单文件分卷失败：{e}"),
+                            LogLevel::Warn,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(PackResult {
         source_path: source.to_path_buf(),
         source_name,
