@@ -80,6 +80,7 @@
 - 加密：7z 格式 `-p密码 -mhe=on`（连文件名一起加密），zip 格式 `-p密码 -mem=AES256`；密码模式 random_per_pack / random_uniform / manual，随机密码 16 位字母数字（剔除 0/O、1/I/l 易混淆字符）。
 - 分卷：源内容总大小（压缩后不可预知）> 阈值（默认 3G）→ `-v{大小}g`（默认 2g）。
 - 混淆 txt：输入先硬链接镜像（`link_or_copy`，不占磁盘）到 temp 暂存目录，混入 `资源说明.txt`（模板替换 `{date}` + 8 位随机 hex），cd 进暂存目录打包 `.`——txt 落在压缩包根，同批每包内容唯一 → hash 必然不同（防网盘按 hash 比对），下载者解压可见来源与日期。
+- **映射文件生成**（`write_mapping_json`）：打包完成后在输出目录生成 `pack_mapping.json`，记录源文件/目录名 → 压缩包名的对应关系，包含字段：source_name（源名称）、archive_name（压缩包名，分卷时为首卷完整文件名如 G002.7z.001）、password（密码或 null）、size_bytes/size_human（源大小）、is_volume（是否分卷）、volume_count（分卷数）；文件顶层包含 generated_at（生成日期）、total_count（总数）。示例见 `pack_mapping_example.json`。
 - CLI 无子命令时仍是解压；`pack` 为子命令（目录恰好叫 pack 时会被优先当子命令解析，已知小歧义）。
 - 取消粒度为包间检查 `should_cancel`（与解压侧对齐，不杀 7z 子进程）。
 - GUI：`App.vue` 为 Tab 壳（KeepAlive 两页状态互不丢），解压页 `components/UnpackView.vue`、打包页 `components/PackView.vue`，公共样式 `styles.css`；Tauri 事件解压 `uz-*`、打包 `pack-*`（前缀隔离不串扰）。

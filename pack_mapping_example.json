@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-10-14",
+  "total_count": 3,
+  "mappings": [
+    {
+      "source_name": "游戏本体",
+      "archive_name": "G001.7z",
+      "password": "aB3dEfGh5jKmNpQr",
+      "size_bytes": 524288000,
+      "size_human": "500.0 MB",
+      "is_volume": false,
+      "volume_count": 1
+    },
+    {
+      "source_name": "DLC合集",
+      "archive_name": "G002.7z.001",
+      "password": "xY9zAbCdEfGhJkMn",
+      "size_bytes": 3221225472,
+      "size_human": "3.0 GB",
+      "is_volume": true,
+      "volume_count": 2
+    },
+    {
+      "source_name": "MOD整合包",
+      "archive_name": "G003.zip",
+      "password": null,
+      "size_bytes": 157286400,
+      "size_human": "150.0 MB",
+      "is_volume": false,
+      "volume_count": 1
+    }
+  ]
+}

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use rand::distributions::{Distribution, Uniform};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use walkdir::WalkDir;
 
 use crate::config::Config;
@@ -69,6 +70,8 @@ impl Default for PackOptions {
 
 #[derive(Clone, Debug)]
 pub struct PackResult {
+    pub source_path: PathBuf,       // 源文件/目录路径
+    pub source_name: String,        // 源文件/目录名称（用于 JSON 映射）
     pub name: String,               // 最终包名（撞名时可能带 " (2)"）
     pub password: Option<String>,   // None = 无密码
     pub size_bytes: u64,            // 源内容总大小
@@ -372,7 +375,7 @@ fn collect_outputs(dir: &Path, name: &str, format: &str) -> Vec<PathBuf> {
     vols
 }
 
-/// 打包单个源 → 一个包。返回 PackResult（含最终撞名后的名字与产物列表）。
+/// 打包单个源 → 一个包。返回 PackResult（含源路径/名称、最终撞名后的名字与产物列表）。
 fn pack_one(
     source: &Path,
     name: &str,
@@ -381,6 +384,10 @@ fn pack_one(
     ex: &Extractor,
     cb: &dyn RunCallback,
 ) -> Result<PackResult, String> {
+    let source_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string());
     let size = content_size(source);
     let out_dir = PathBuf::from(&opts.output_dir);
     let final_name = unique_pack_name(&out_dir, name, &opts.format);
@@ -413,6 +420,8 @@ fn pack_one(
         return Err("打包未产出任何文件".to_string());
     }
     Ok(PackResult {
+        source_path: source.to_path_buf(),
+        source_name,
         name: final_name,
         password: password.map(|s| s.to_string()),
         size_bytes: size,
@@ -565,6 +574,15 @@ pub fn run_pack(
         ),
         if summary.failed.is_empty() { LogLevel::Ok } else { LogLevel::Warn },
     );
+
+    // 生成 JSON 映射文件
+    if !summary.ok.is_empty() {
+        if let Err(e) = write_mapping_json(&out_abs, &summary.ok, cb) {
+            log(&format!("[警告] 生成映射文件失败：{e}"), LogLevel::Warn);
+            summary.warns.push(format!("生成映射文件失败：{e}"));
+        }
+    }
+
     summary
 }
 
@@ -580,6 +598,62 @@ fn fmt_gb(gb: f64) -> String {
         }
     }
     s
+}
+
+/// 生成 JSON 映射文件：记录源文件名 → 压缩包名的对应关系。
+fn write_mapping_json(
+    out_dir: &Path,
+    results: &[PackResult],
+    cb: &dyn RunCallback,
+) -> Result<(), String> {
+    let mapping: Vec<_> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "source_name": r.source_name,
+                "archive_name": format!("{}.{}", r.name, if r.outputs.first()
+                    .and_then(|p| p.extension())
+                    .and_then(|e| e.to_str())
+                    .map(|e| e == "001")
+                    .unwrap_or(false) {
+                    // 分卷：取第一个文件的完整扩展名（如 7z.001）
+                    r.outputs.first()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix(&format!("{}.", r.name)))
+                        .unwrap_or("7z")
+                } else {
+                    // 单卷：取扩展名
+                    r.outputs.first()
+                        .and_then(|p| p.extension())
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("7z")
+                }),
+                "password": r.password,
+                "size_bytes": r.size_bytes,
+                "size_human": fmt_size(r.size_bytes),
+                "is_volume": r.outputs.len() > 1,
+                "volume_count": r.outputs.len(),
+            })
+        })
+        .collect();
+
+    let json_content = serde_json::to_string_pretty(&json!({
+        "generated_at": chrono_like_today(),
+        "total_count": results.len(),
+        "mappings": mapping,
+    }))
+    .map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+
+    let json_path = out_dir.join("pack_mapping.json");
+    fs::write(&json_path, json_content)
+        .map_err(|e| format!("写入 JSON 文件失败：{e}"))?;
+
+    cb.on_log(
+        &format!("[完成] 已生成映射文件：{}", json_path.display()),
+        LogLevel::Ok,
+    );
+    Ok(())
 }
 
 /// 相对路径 → 基于进程 cwd 的绝对路径（不用 canonicalize，避免 Windows \\?\ 前缀）。
@@ -707,5 +781,61 @@ mod tests {
         assert_eq!(fmt_size(300), "300 B");
         assert_eq!(fmt_size(2 * MB), "2.0 MB");
         assert_eq!(fmt_size((3.2 * GB as f64) as u64), "3.2 GB");
+    }
+
+    #[test]
+    fn write_mapping_json_generates_correct_structure() {
+        use crate::types::NullCallback;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path();
+
+        let results = vec![
+            PackResult {
+                source_path: PathBuf::from("D:/source/game1"),
+                source_name: "game1".to_string(),
+                name: "G001".to_string(),
+                password: Some("pass123".to_string()),
+                size_bytes: 1024 * 1024 * 500, // 500 MB
+                outputs: vec![out_dir.join("G001.7z")],
+            },
+            PackResult {
+                source_path: PathBuf::from("D:/source/game2"),
+                source_name: "game2".to_string(),
+                name: "G002".to_string(),
+                password: None,
+                size_bytes: 1024 * 1024 * 1024 * 3, // 3 GB
+                outputs: vec![
+                    out_dir.join("G002.7z.001"),
+                    out_dir.join("G002.7z.002"),
+                ],
+            },
+        ];
+
+        let cb = NullCallback;
+        write_mapping_json(out_dir, &results, &cb).unwrap();
+
+        let json_path = out_dir.join("pack_mapping.json");
+        assert!(json_path.exists());
+
+        let content = fs::read_to_string(&json_path).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(data["total_count"], 2);
+        assert_eq!(data["mappings"].as_array().unwrap().len(), 2);
+
+        let m0 = &data["mappings"][0];
+        assert_eq!(m0["source_name"], "game1");
+        assert_eq!(m0["archive_name"], "G001.7z");
+        assert_eq!(m0["password"], "pass123");
+        assert_eq!(m0["is_volume"], false);
+        assert_eq!(m0["volume_count"], 1);
+
+        let m1 = &data["mappings"][1];
+        assert_eq!(m1["source_name"], "game2");
+        assert_eq!(m1["archive_name"], "G002.7z.001");
+        assert!(m1["password"].is_null());
+        assert_eq!(m1["is_volume"], true);
+        assert_eq!(m1["volume_count"], 2);
     }
 }
