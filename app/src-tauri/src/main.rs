@@ -285,6 +285,35 @@ fn start_pack(
     Ok(())
 }
 
+/// 加载 pack_mapping.json 文件
+#[tauri::command]
+fn load_mapping_file(dir: String) -> Result<String, String> {
+    let json_path = PathBuf::from(dir).join("pack_mapping.json");
+    if !json_path.exists() {
+        return Err(format!("未找到 pack_mapping.json 文件"));
+    }
+    std::fs::read_to_string(&json_path)
+        .map_err(|e| format!("读取文件失败：{}", e))
+}
+
+/// 保存 pack_mapping.json 文件（先备份）
+#[tauri::command]
+fn save_mapping_file(dir: String, content: String) -> Result<(), String> {
+    let json_path = PathBuf::from(dir).join("pack_mapping.json");
+
+    // 备份旧文件
+    if json_path.exists() {
+        let backup_path = json_path.with_extension("json.bak");
+        if let Err(e) = std::fs::copy(&json_path, &backup_path) {
+            eprintln!("备份文件失败：{}", e);
+        }
+    }
+
+    // 写入新内容
+    std::fs::write(&json_path, content)
+        .map_err(|e| format!("写入文件失败：{}", e))
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -312,6 +341,8 @@ fn main() {
             start_run,
             cancel_run,
             start_pack,
+            load_mapping_file,
+            save_mapping_file,
         ])
         .run(tauri::generate_context!())
         .expect("运行自动解压工具失败");

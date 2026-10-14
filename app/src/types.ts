@@ -160,3 +160,64 @@ export function fmtSize(n: number): string {
   if (n >= MB) return `${(n / MB).toFixed(1)} MB`;
   return `${n} B`;
 }
+
+// ---------------------------------------------------------------------------
+// 游戏库管理（扩展 pack_mapping.json）
+// ---------------------------------------------------------------------------
+
+export type EngineType =
+  | "Unity"
+  | "Unreal"
+  | "RPG Maker"
+  | "Godot"
+  | "自研"
+  | "其他"
+  | "";  // 未标记
+
+export interface GameMetadata {
+  version: string;              // 版本号（如 v1.2.3）
+  engine: EngineType;           // 引擎类型
+  is_apk: boolean;              // 是否 APK 安装包
+  custom_tags?: string[];       // 自定义标签（可选）
+  notes?: string;               // 备注（可选）
+}
+
+export interface GameMapping {
+  source_name: string;
+  archive_name: string;
+  password: string | null;
+  source_size: {
+    bytes: number;
+    mb: string;
+    gb: string;
+    human: string;
+  };
+  compressed_size: {
+    bytes: number;
+    mb: string;
+    gb: string;
+    human: string;
+  };
+  compression_ratio: string;
+  is_volume: boolean;
+  volume_count: number;
+  created_at: string;
+  metadata?: GameMetadata;  // 用户手动标记的元数据
+}
+
+export interface PackMappingFile {
+  generated_at: string;
+  total_count: number;
+  mappings: GameMapping[];
+}
+
+// 引擎标签颜色映射
+export const ENGINE_COLORS: Record<EngineType, string> = {
+  "Unity": "#44D62C",
+  "Unreal": "#5B9FFF",
+  "RPG Maker": "#FF6B9D",
+  "Godot": "#478CBF",
+  "自研": "#FFB638",
+  "其他": "#B4BEC8",
+  "": "#666666",
+};

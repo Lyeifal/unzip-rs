@@ -8,10 +8,8 @@ import { onMounted, ref } from "vue";
 import { useTheme } from "./composables/useTheme";
 import UnpackView from "./components/UnpackView.vue";
 import PackView from "./components/PackView.vue";
+import LibraryView from "./components/LibraryView.vue";
 import ThemeSettings from "./components/ThemeSettings.vue";
-
-// TODO: 等实现后导入
-// import LibraryView from "./components/LibraryView.vue";
 
 // 当前标签页
 type TabType = "unpack" | "pack" | "library";
@@ -69,12 +67,7 @@ onMounted(() => {
     <KeepAlive>
       <UnpackView v-if="tab === 'unpack'" />
       <PackView v-else-if="tab === 'pack'" />
-      <div v-else class="glass-card" style="padding: 40px; text-align: center">
-        <h2>🚧 游戏库管理</h2>
-        <p style="margin-top: 16px; color: var(--text-secondary)">
-          即将推出...
-        </p>
-      </div>
+      <LibraryView v-else-if="tab === 'library'" />
     </KeepAlive>
 
     <!-- 主题设置面板 -->
