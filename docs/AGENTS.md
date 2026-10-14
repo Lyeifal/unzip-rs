@@ -78,7 +78,7 @@
 - 入口 `run_pack(sources, opts, cfg, cb)`：逐源一个包；命名从 `name_start` 起末尾数字 +step 递增（宽度保留，G198→G199，Z999→Z1000）；输出撞名自动 " (2)" 避让，绝不覆盖旧包。
 - 打包走 `7z a`（Extractor 的 7z 探测与回退链与解压共用）；产物路径必须绝对（7z 的 current_dir 是 temp 暂存目录）。
 - 加密：7z 格式 `-p密码 -mhe=on`（连文件名一起加密），zip 格式 `-p密码 -mem=AES256`；密码模式 random_per_pack / random_uniform / manual，随机密码 16 位字母数字（剔除 0/O、1/I/l 易混淆字符）。
-- 分卷：源内容总大小（压缩后不可预知）> 阈值（默认 3G）→ `-v{大小}g`（默认 2g）。
+- 分卷：源内容总大小（压缩后不可预知）> 阈值（默认 3G）→ `-v{大小}g`（默认 2g）。**单文件分卷优化**：启用分卷参数但压缩后只产生一个文件时，自动重命名去除 `.001` 后缀（Test001.7z.001 → Test001.7z），避免假分卷误导。
 - 混淆 txt：输入先硬链接镜像（`link_or_copy`，不占磁盘）到 temp 暂存目录，混入 `资源说明.txt`（模板替换 `{date}` + 8 位随机 hex），cd 进暂存目录打包 `.`——txt 落在压缩包根，同批每包内容唯一 → hash 必然不同（防网盘按 hash 比对），下载者解压可见来源与日期。
 - **映射文件生成**（`write_mapping_json`）：打包完成后在输出目录生成 `pack_mapping.json`，记录源文件/目录名 → 压缩包名的对应关系，包含字段：source_name（源名称）、archive_name（压缩包名，分卷时为首卷完整文件名如 G002.7z.001）、password（密码或 null）、size_bytes/size_human（源大小）、is_volume（是否分卷）、volume_count（分卷数）；文件顶层包含 generated_at（生成日期）、total_count（总数）。示例见 `docs/examples/pack_mapping_example.json`。
 - CLI 无子命令时仍是解压；`pack` 为子命令（目录恰好叫 pack 时会被优先当子命令解析，已知小歧义）。
