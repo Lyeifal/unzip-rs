@@ -2,6 +2,8 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import GameCard from "./GameCard.vue";
+import StyledSelect from "./StyledSelect.vue";
+import type { SelectOption } from "../types/select";
 import type { GameMapping, GameMetadata, PackMappingFile } from "../types";
 
 // 状态
@@ -12,6 +14,21 @@ const error = ref("");
 const searchQuery = ref("");
 const filterEngine = ref("");
 const sortBy = ref<"name" | "size" | "ratio" | "date">("name");
+const engineFilterOptions: SelectOption[] = [
+  { value: "", label: "全部引擎" },
+  { value: "Unity", label: "Unity" },
+  { value: "Unreal", label: "Unreal" },
+  { value: "RPG Maker", label: "RPG Maker" },
+  { value: "Godot", label: "Godot" },
+  { value: "自研", label: "自研" },
+  { value: "其他", label: "其他" },
+];
+const sortOptions: SelectOption[] = [
+  { value: "name", label: "按名称排序" },
+  { value: "size", label: "按大小排序" },
+  { value: "ratio", label: "按压缩率排序" },
+  { value: "date", label: "按日期排序" },
+];
 
 // 加载 JSON 文件
 async function loadMappingFile() {
@@ -226,22 +243,14 @@ onMounted(() => {
           />
         </div>
 
-        <select v-model="filterEngine" class="select-glass">
-          <option value="">全部引擎</option>
-          <option value="Unity">Unity</option>
-          <option value="Unreal">Unreal</option>
-          <option value="RPG Maker">RPG Maker</option>
-          <option value="Godot">Godot</option>
-          <option value="自研">自研</option>
-          <option value="其他">其他</option>
-        </select>
+        <StyledSelect
+          v-model="filterEngine"
+          class="select-glass"
+          :options="engineFilterOptions"
+          aria-label="筛选游戏引擎"
+        />
 
-        <select v-model="sortBy" class="select-glass">
-          <option value="name">按名称排序</option>
-          <option value="size">按大小排序</option>
-          <option value="ratio">按压缩率排序</option>
-          <option value="date">按日期排序</option>
-        </select>
+        <StyledSelect v-model="sortBy" class="select-glass" :options="sortOptions" aria-label="游戏排序方式" />
       </div>
     </div>
 
@@ -292,12 +301,14 @@ onMounted(() => {
 .page-content {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
 }
 
 /* 标题栏 */
 .library-header {
-  text-align: center;
+  text-align: left;
   margin-bottom: 8px;
 }
 
@@ -316,7 +327,7 @@ onMounted(() => {
 
 /* 控制栏 */
 .control-bar {
-  padding: 20px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -379,6 +390,8 @@ onMounted(() => {
 /* 筛选行 */
 .filter-row {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
 }
@@ -388,6 +401,12 @@ onMounted(() => {
   position: relative;
   display: flex;
   align-items: center;
+  min-width: 240px;
+}
+
+.filter-row > .select-glass {
+  flex: 0 1 200px;
+  min-width: 175px;
 }
 
 .search-icon {
@@ -461,14 +480,14 @@ onMounted(() => {
 /* 游戏卡片网格 */
 .game-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
 }
 
 @media (max-width: 960px) {
   .game-grid {
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
   }
 }
 

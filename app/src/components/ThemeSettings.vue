@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { useTheme } from "../composables/useTheme";
+import { useTheme, type ManualThemeColors } from "../composables/useTheme";
+import { THEME_PRESETS, type ThemePresetId } from "../utils/themePresets";
 
 const emit = defineEmits<{
   close: [];
@@ -11,6 +12,60 @@ const theme = useTheme();
 // 文件上传
 const fileInput = ref<HTMLInputElement | null>(null);
 const isDragging = ref(false);
+const pickerError = ref("");
+
+type ManualColorKey = keyof ManualThemeColors;
+type EyeDropperCtor = new () => { open: () => Promise<{ sRGBHex: string }> };
+
+const manualColorOptions: { key: ManualColorKey; label: string }[] = [
+  { key: "primary", label: "主色" },
+  { key: "secondary", label: "辅助色" },
+  { key: "accent", label: "强调色" },
+  { key: "background", label: "背景色" },
+];
+
+// 主题预设
+const presets = THEME_PRESETS;
+
+function isPresetActive(id: ThemePresetId): boolean {
+  return (
+    theme.config.value.themeMode === "preset" &&
+    theme.config.value.presetId === id
+  );
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/") || /\.avif$/i.test(file.name);
+}
+
+function updateManualColor(key: ManualColorKey, event: Event) {
+  const color = (event.target as HTMLInputElement).value;
+  pickerError.value = "";
+  theme.updateManualColor(key, color);
+}
+
+async function pickColor(key: ManualColorKey) {
+  const EyeDropper = (window as Window & { EyeDropper?: EyeDropperCtor }).EyeDropper;
+  if (!EyeDropper) {
+    pickerError.value = "当前 WebView 暂不支持屏幕吸色，请用颜色块手动选择。";
+    return;
+  }
+
+  pickerError.value = "";
+  try {
+    const { sRGBHex } = await new EyeDropper().open();
+    theme.updateManualColor(key, sRGBHex);
+  } catch (error) {
+    if ((error as DOMException)?.name !== "AbortError") {
+      pickerError.value = error instanceof Error ? error.message : "吸色失败";
+    }
+  }
+}
+
+function updateCardTransparency(event: Event) {
+  const transparency = Number((event.target as HTMLInputElement).value) / 100;
+  theme.updateCardOpacity(1 - transparency);
+}
 
 // 选择文件
 function selectFile() {
@@ -24,6 +79,7 @@ async function handleFileSelect(event: Event) {
   if (file) {
     await uploadFile(file);
   }
+  target.value = "";
 }
 
 // 上传文件
@@ -50,7 +106,7 @@ async function handleDrop(event: DragEvent) {
   isDragging.value = false;
 
   const file = event.dataTransfer?.files[0];
-  if (file && file.type.startsWith("image/")) {
+  if (file && isImageFile(file)) {
     await uploadFile(file);
   }
 }
@@ -77,6 +133,34 @@ const paletteColors = computed(() => {
       </div>
 
       <div class="panel-content">
+        <!-- 主题预设 -->
+        <section class="section">
+          <h3 class="section-title">主题预设</h3>
+          <p class="section-hint">配色预设可与壁纸和卡片透明度搭配使用。</p>
+          <div class="preset-gallery">
+            <button
+              v-for="preset in presets"
+              :key="preset.id"
+              class="preset-card"
+              :class="{ active: isPresetActive(preset.id) }"
+              :aria-pressed="isPresetActive(preset.id)"
+              type="button"
+              @click="theme.selectPreset(preset.id)"
+            >
+              <span class="preset-swatches">
+                <span
+                  v-for="(color, index) in preset.swatches"
+                  :key="index"
+                  class="preset-swatch"
+                  :style="{ backgroundColor: color }"
+                ></span>
+              </span>
+              <span class="preset-name">{{ preset.label }}</span>
+              <span class="preset-desc">{{ preset.description }}</span>
+            </button>
+          </div>
+        </section>
+
         <!-- 壁纸上传区域 -->
         <section class="section">
           <h3 class="section-title">背景壁纸</h3>
@@ -94,6 +178,9 @@ const paletteColors = computed(() => {
             <button class="remove-btn btn-glass" @click="theme.clearWallpaper()">
               🗑️ 移除壁纸
             </button>
+            <button class="replace-btn btn-glass" @click="selectFile">
+              🖼️ 更换壁纸
+            </button>
           </div>
 
           <!-- 上传区域 -->
@@ -108,13 +195,13 @@ const paletteColors = computed(() => {
           >
             <div class="upload-icon">📁</div>
             <p class="upload-text">点击或拖拽图片到此处</p>
-            <p class="upload-hint">支持 JPG、PNG、WebP，限制 5MB</p>
+            <p class="upload-hint">支持 JPG、PNG、WebP、AVIF，限制 5MB</p>
           </div>
 
           <input
             ref="fileInput"
             type="file"
-            accept="image/*"
+            accept="image/*,.avif"
             style="display: none"
             @change="handleFileSelect"
           />
@@ -129,6 +216,30 @@ const paletteColors = computed(() => {
           <div v-if="theme.error.value" class="error-message">
             {{ theme.error.value }}
           </div>
+        </section>
+
+        <section class="section">
+          <h3 class="section-title">手动配色</h3>
+          <p class="section-hint">可以直接选颜色，也可以吸取屏幕上预览图的颜色。</p>
+          <p v-if="theme.config.value.themeMode !== 'manual'" class="section-hint mode-hint">
+            修改任意颜色将自动切换到手动配色模式。
+          </p>
+          <div class="manual-color-grid">
+            <div v-for="item in manualColorOptions" :key="item.key" class="manual-color-item">
+              <label :for="`manual-color-${item.key}`">{{ item.label }}</label>
+              <div class="manual-color-control">
+                <input
+                  :id="`manual-color-${item.key}`"
+                  type="color"
+                  :value="theme.config.value.manualColors[item.key]"
+                  @input="updateManualColor(item.key, $event)"
+                />
+                <code>{{ theme.config.value.manualColors[item.key] }}</code>
+                <button class="btn-glass eyedropper-btn" @click="pickColor(item.key)">吸取</button>
+              </div>
+            </div>
+          </div>
+          <p v-if="pickerError" class="error-message picker-error">{{ pickerError }}</p>
         </section>
 
         <!-- 自动配色 -->
@@ -152,29 +263,29 @@ const paletteColors = computed(() => {
           </label>
 
           <!-- 配色预览 -->
-          <div
-            v-if="
-              theme.config.value.autoTheme && theme.config.value.palette
-            "
-            class="palette-preview"
-          >
-            <p class="palette-title">提取的配色方案：</p>
-            <div class="palette-grid">
-              <div
-                v-for="item in paletteColors"
-                :key="item.label"
-                class="palette-item"
-              >
+          <div v-if="theme.config.value.autoTheme" class="palette-preview">
+            <template v-if="theme.config.value.palette">
+              <p class="palette-title">提取的配色方案：</p>
+              <div class="palette-grid">
                 <div
-                  class="color-swatch"
-                  :style="{ backgroundColor: item.color }"
-                ></div>
-                <div class="color-info">
-                  <span class="color-label">{{ item.label }}</span>
-                  <span class="color-hex">{{ item.color }}</span>
+                  v-for="item in paletteColors"
+                  :key="item.label"
+                  class="palette-item"
+                >
+                  <div
+                    class="color-swatch"
+                    :style="{ backgroundColor: item.color }"
+                  ></div>
+                  <div class="color-info">
+                    <span class="color-label">{{ item.label }}</span>
+                    <span class="color-hex">{{ item.color }}</span>
+                  </div>
                 </div>
               </div>
-            </div>
+            </template>
+            <p v-else class="palette-title">
+              尚未从壁纸提取到配色，可点击重试。
+            </p>
 
             <button
               class="btn-glass reextract-btn"
@@ -183,6 +294,26 @@ const paletteColors = computed(() => {
             >
               🔄 重新提取
             </button>
+          </div>
+        </section>
+
+        <section class="section appearance-section">
+          <h3 class="section-title">界面外观</h3>
+          <div class="slider-control">
+            <label class="slider-label">
+              <span>卡片透明度</span>
+              <span class="slider-value">{{ Math.round((1 - theme.config.value.cardOpacity) * 100) }}%</span>
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="45"
+              step="5"
+              :value="Math.round((1 - theme.config.value.cardOpacity) * 100 / 5) * 5"
+              @input="updateCardTransparency"
+              class="slider"
+            />
+            <p class="section-hint">只调整卡片表面，文字保持清晰。</p>
           </div>
         </section>
 
@@ -270,7 +401,7 @@ const paletteColors = computed(() => {
   align-items: center;
   justify-content: space-between;
   padding: 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .panel-title {
@@ -309,11 +440,134 @@ const paletteColors = computed(() => {
   margin-bottom: 0;
 }
 
+.section-hint {
+  margin: -7px 0 12px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.manual-color-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.manual-color-item {
+  min-width: 0;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface-input) 75%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.manual-color-item > label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.manual-color-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.manual-color-control input[type="color"] {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 32px;
+  padding: 2px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.manual-color-control code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.eyedropper-btn {
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.picker-error {
+  margin-top: 10px;
+}
+
 .section-title {
   font-size: 16px;
   font-weight: 600;
-  color: var(--primary);
+  color: var(--text-primary);
   margin: 0 0 16px;
+}
+
+.mode-hint {
+  color: var(--warning);
+}
+
+/* 主题预设选择 */
+.preset-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.preset-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border);
+}
+
+.preset-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary), 0 0 12px var(--primary-glow);
+}
+
+.preset-swatches {
+  display: flex;
+  gap: 4px;
+}
+
+.preset-swatch {
+  flex: 1;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.preset-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.preset-desc {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
 }
 
 /* 壁纸预览 */
@@ -334,6 +588,14 @@ const paletteColors = computed(() => {
 .remove-btn {
   position: absolute;
   top: 12px;
+  right: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+.replace-btn {
+  position: absolute;
+  bottom: 12px;
   right: 12px;
   padding: 8px 16px;
   font-size: 13px;
@@ -523,10 +785,10 @@ const paletteColors = computed(() => {
   appearance: none;
   width: 18px;
   height: 18px;
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  background: var(--primary);
   border-radius: 50%;
   cursor: pointer;
-  box-shadow: 0 2px 8px var(--primary-glow);
+  box-shadow: 0 1px 3px var(--glass-shadow);
   transition: transform 0.2s ease;
 }
 
@@ -537,15 +799,21 @@ const paletteColors = computed(() => {
 .slider::-moz-range-thumb {
   width: 18px;
   height: 18px;
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  background: var(--primary);
   border-radius: 50%;
   cursor: pointer;
   border: none;
-  box-shadow: 0 2px 8px var(--primary-glow);
+  box-shadow: 0 1px 3px var(--glass-shadow);
   transition: transform 0.2s ease;
 }
 
 .slider::-moz-range-thumb:hover {
   transform: scale(1.2);
+}
+
+@media (max-width: 520px) {
+  .manual-color-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

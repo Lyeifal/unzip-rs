@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import { ENGINE_COLORS, type GameMapping, type GameMetadata } from "../types";
+import StyledSelect from "./StyledSelect.vue";
+import type { SelectOption } from "../types/select";
 
 const props = defineProps<{
   mapping: GameMapping;
 }>();
+
+const engineOptions: SelectOption[] = [
+  { value: "", label: "未标记" },
+  { value: "Unity", label: "Unity" },
+  { value: "Unreal", label: "Unreal" },
+  { value: "RPG Maker", label: "RPG Maker" },
+  { value: "Godot", label: "Godot" },
+  { value: "自研", label: "自研" },
+  { value: "其他", label: "其他" },
+];
 
 const emit = defineEmits<{
   "update:metadata": [metadata: GameMetadata];
@@ -54,9 +66,7 @@ function cancelVersion() {
 }
 
 // 引擎选择变更
-function handleEngineChange(event: Event) {
-  const target = event.target as HTMLSelectElement;
-  metadata.engine = target.value as any;
+function handleEngineChange() {
   saveMetadata();
 }
 
@@ -122,20 +132,14 @@ const engineColor = computed(() => {
       <!-- 引擎选择 -->
       <div class="meta-field">
         <span class="field-label">引擎</span>
-        <select
+        <StyledSelect
           v-model="metadata.engine"
           class="engine-select select-glass"
+          :options="engineOptions"
+          aria-label="游戏引擎"
           :style="{ borderColor: engineColor, color: engineColor }"
-          @change="handleEngineChange"
-        >
-          <option value="">未标记</option>
-          <option value="Unity">Unity</option>
-          <option value="Unreal">Unreal</option>
-          <option value="RPG Maker">RPG Maker</option>
-          <option value="Godot">Godot</option>
-          <option value="自研">自研</option>
-          <option value="其他">其他</option>
-        </select>
+          @update:model-value="handleEngineChange"
+        />
       </div>
 
       <!-- APK 复选框 -->
@@ -193,17 +197,18 @@ const engineColor = computed(() => {
 
 <style scoped>
 .game-card {
-  padding: 16px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-width: 220px;
+  gap: 10px;
+  min-width: 0;
+  background-color: color-mix(in srgb, var(--surface) var(--card-opacity), transparent);
 }
 
 .game-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 48px var(--primary-glow);
-  border-color: var(--primary);
+  transform: none;
+  box-shadow: 0 3px 12px var(--glass-shadow);
+  border-color: #58685f;
 }
 
 .card-icon {
@@ -235,9 +240,9 @@ const engineColor = computed(() => {
 
 /* 元数据编辑区 */
 .card-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
 }
 
 .meta-field {
@@ -255,8 +260,8 @@ const engineColor = computed(() => {
 /* 版本号显示/编辑 */
 .version-display {
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--surface-input);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.2s ease;
@@ -266,7 +271,7 @@ const engineColor = computed(() => {
 }
 
 .version-display:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-raised);
   border-color: var(--primary);
 }
 
@@ -296,31 +301,33 @@ const engineColor = computed(() => {
 /* 引擎选择器 */
 .engine-select {
   width: 100%;
-  padding: 8px 12px;
+  flex: 0 0 100%;
   font-size: 13px;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.05);
-  transition: all 0.2s ease;
 }
 
-.engine-select:hover {
-  background: rgba(255, 255, 255, 0.08);
+:deep(.engine-select .select-control) {
+  min-height: 34px;
+  padding: 6px 30px 6px 10px;
+  border-color: inherit;
+  color: inherit;
 }
 
 /* APK 复选框 */
 .checkbox-field {
+  grid-column: 1 / -1;
   flex-direction: row !important;
   align-items: center;
   gap: 8px !important;
-  padding: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  padding: 7px 9px;
+  background: var(--surface-input);
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .checkbox-field:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-raised);
 }
 
 .checkbox-field input[type="checkbox"] {
@@ -337,12 +344,7 @@ const engineColor = computed(() => {
 /* 分隔线 */
 .card-divider {
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.1) 50%,
-    transparent
-  );
+  background: var(--border-subtle);
 }
 
 /* 统计区 */
@@ -395,8 +397,8 @@ const engineColor = computed(() => {
   height: 100%;
   border-radius: 2px;
   transition: width 0.3s ease;
-  box-shadow: 0 0 8px currentColor;
-  animation: progressPulse 2s ease-in-out infinite;
+  box-shadow: none;
+  animation: none;
 }
 
 /* 卡片底部 */

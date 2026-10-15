@@ -213,11 +213,11 @@ export interface PackMappingFile {
 
 // 引擎标签颜色映射
 export const ENGINE_COLORS: Record<EngineType, string> = {
-  "Unity": "#44D62C",
-  "Unreal": "#5B9FFF",
-  "RPG Maker": "#FF6B9D",
-  "Godot": "#478CBF",
-  "自研": "#FFB638",
-  "其他": "#B4BEC8",
-  "": "#666666",
+  "Unity": "var(--engine-unity)",
+  "Unreal": "var(--engine-unreal)",
+  "RPG Maker": "var(--engine-rpgmaker)",
+  "Godot": "var(--engine-godot)",
+  "自研": "var(--engine-custom)",
+  "其他": "var(--engine-other)",
+  "": "var(--text-secondary)",
 };

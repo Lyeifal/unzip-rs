@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import StyledSelect from "./StyledSelect.vue";
+import type { SelectOption } from "../types/select";
 import {
   defaultConfig,
   formatRule,
@@ -24,6 +26,15 @@ const fileRows: { key: FileKey; label: string }[] = [
   { key: "seven_zip", label: "7-Zip 路径" },
   { key: "unrar", label: "UnRAR 路径" },
   { key: "lz4", label: "lz4.exe 回退路径（可选，默认可留空）" },
+];
+
+const passwordStrategyOptions: SelectOption[] = [
+  { value: "recent_first", label: "最近成功优先（自动置顶，越用越准）" },
+  { value: "list_order", label: "严格按列表顺序" },
+];
+const ruleKindOptions: SelectOption[] = [
+  { value: "suffix", label: "按压缩包后缀（如 .lz4、.zip）" },
+  { value: "keyword", label: "按文件名或路径关键词" },
 ];
 
 const cfg = reactive<Config>(defaultConfig());
@@ -349,10 +360,12 @@ onUnmounted(() => {
     <!-- 密码排序规则 -->
     <div class="row">
       <label class="lbl">密码排序规则：</label>
-      <select v-model="cfg.password_strategy" class="input select">
-        <option value="recent_first">最近成功优先（自动置顶，越用越准）</option>
-        <option value="list_order">严格按列表顺序</option>
-      </select>
+      <StyledSelect
+        v-model="cfg.password_strategy"
+        class="select"
+        :options="passwordStrategyOptions"
+        aria-label="密码排序规则"
+      />
     </div>
 
     <!-- 高级设置 -->
@@ -432,10 +445,12 @@ onUnmounted(() => {
         <div class="dlg-title">密码策略规则</div>
         <div class="row">
           <label class="lbl">条件类型</label>
-          <select v-model="ruleKind" class="input select">
-            <option value="suffix">按压缩包后缀（如 .lz4、.zip）</option>
-            <option value="keyword">按文件名或路径关键词</option>
-          </select>
+          <StyledSelect
+            v-model="ruleKind"
+            class="select"
+            :options="ruleKindOptions"
+            aria-label="匹配规则类型"
+          />
         </div>
         <div class="row">
           <label class="lbl">条件值</label>

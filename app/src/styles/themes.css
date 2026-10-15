@@ -1,62 +1,59 @@
 /**
- * 主题变量定义
- * CSS 变量可通过 JavaScript 动态修改
+ * Shared palette for the graphite and sage interface.
+ * Wallpaper sampling can still override the accent colors at runtime.
  */
-
 :root {
-  /* 主色系（默认青蓝色，可通过壁纸取色动态修改） */
-  --primary: #00d9ff;
-  --primary-light: #33e4ff;
-  --primary-dark: #00a8cc;
-  --primary-glow: rgba(0, 217, 255, 0.5);
+  color-scheme: dark;
 
-  --secondary: #5b9fff;
-  --accent: #ffb638;
+  --primary: #83ad9d;
+  --primary-light: #a3c4b7;
+  --primary-dark: #638e7f;
+  --primary-glow: rgba(131, 173, 157, 0.18);
+  --primary-contrast: #17201c;
+  --secondary: #9aafa6;
+  --accent: #d7b77c;
 
-  /* 背景色 */
-  --bg-dark: #1a1a2e;
-  --bg-darker: #0f0f1a;
+  --bg-dark: #191e1e;
+  --bg-darker: #141818;
+  --surface: #222828;
+  --surface-raised: #293130;
+  --surface-input: #191f1f;
+  --border: #3a4542;
+  --border-subtle: #303a38;
 
-  /* 文字颜色 */
-  --text-primary: #ffffff;
-  --text-secondary: rgba(255, 255, 255, 0.7);
-  --text-tertiary: rgba(255, 255, 255, 0.5);
+  --text-primary: #e6eae7;
+  --text-secondary: #b0bbb5;
+  --text-tertiary: #a2ada6;
 
-  /* 功能色 */
-  --success: #00ffb3;
-  --warning: #ffd60a;
-  --error: #ff375f;
+  --success: #87b69a;
+  --warning: #d9b56f;
+  --error: #d7837d;
 
-  /* 引擎标签颜色 */
-  --engine-unity: #44d62c;
-  --engine-unreal: #5b9fff;
-  --engine-rpgmaker: #ff6b9d;
-  --engine-godot: #478cbf;
-  --engine-custom: #ffb638;
-  --engine-other: #b4bec8;
+  --engine-unity: #9ab783;
+  --engine-unreal: #94a9c3;
+  --engine-rpgmaker: #c58c9e;
+  --engine-godot: #81a9b8;
+  --engine-custom: #d7b77c;
+  --engine-other: #b0bbb5;
 
-  /* 毛玻璃效果 */
-  --glass-bg: rgba(255, 255, 255, 0.08);
-  --glass-border: rgba(255, 255, 255, 0.18);
-  --glass-shadow: rgba(0, 0, 0, 0.2);
+  --glass-bg: #222828;
+  --glass-border: #3a4542;
+  --glass-shadow: rgba(0, 0, 0, 0.22);
+  --card-opacity: 92%;
 
-  /* 壁纸相关（由 JavaScript 设置） */
   --user-wallpaper: none;
   --wallpaper-blur: 0px;
   --wallpaper-darkness: 0.4;
 
-  /* 动画时间 */
   --transition-fast: 0.15s;
-  --transition-normal: 0.3s;
-  --transition-slow: 0.5s;
+  --transition-normal: 0.2s;
+  --transition-slow: 0.35s;
 
-  /* 圆角 */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
 
-  /* 间距 */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 12px;

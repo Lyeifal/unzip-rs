@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import StyledSelect from "./StyledSelect.vue";
+import type { SelectOption } from "../types/select";
 import {
   defaultPackOptions,
   fmtSize,
@@ -12,6 +14,19 @@ import {
 } from "../types";
 
 const LEVELS = ["ok", "error", "warn", "skip", "info"] as const;
+
+const formatOptions: SelectOption[] = [
+  { value: "7z", label: "7z（推荐：AES-256 + 文件名加密）" },
+  { value: "zip", label: "zip（兼容性好，AES-256）" },
+];
+const compressionLevelOptions: SelectOption[] = [
+  { value: 0, label: "0 - 仅存储（最快）" },
+  { value: 1, label: "1" },
+  { value: 3, label: "3" },
+  { value: 5, label: "5 - 默认（均衡）" },
+  { value: 7, label: "7" },
+  { value: 9, label: "9 - 极限（最慢）" },
+];
 
 const opts = reactive(defaultPackOptions());
 const items = ref<string[]>([]);
@@ -247,21 +262,16 @@ onUnmounted(() => {
       </div>
       <div class="row">
         <label class="lbl">压缩格式</label>
-        <select v-model="opts.format" class="input select">
-          <option value="7z">7z（推荐：AES-256 + 文件名加密）</option>
-          <option value="zip">zip（兼容性好，AES-256）</option>
-        </select>
+        <StyledSelect v-model="opts.format" class="select" :options="formatOptions" aria-label="压缩格式" />
       </div>
       <div class="row">
         <label class="lbl">压缩级别</label>
-        <select v-model.number="opts.compression_level" class="input select">
-          <option :value="0">0 - 仅存储（最快）</option>
-          <option :value="1">1</option>
-          <option :value="3">3</option>
-          <option :value="5">5 - 默认（均衡）</option>
-          <option :value="7">7</option>
-          <option :value="9">9 - 极限（最慢）</option>
-        </select>
+        <StyledSelect
+          v-model="opts.compression_level"
+          class="select"
+          :options="compressionLevelOptions"
+          aria-label="压缩级别"
+        />
       </div>
     </section>
 
