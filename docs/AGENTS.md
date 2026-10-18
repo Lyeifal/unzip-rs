@@ -38,6 +38,8 @@
 
 ## 常用命令
 
+- Windows 桌面入口在 debug/release 均使用 `windows_subsystem=windows`，不能仅 release 启用；右键常注册到开发版，控制台子系统会在进入 main/单实例转发前闪出终端。7z/UnRAR/lz4 子进程继续使用 `CREATE_NO_WINDOW`。只有用户显式开启 `shell_show_console` 时，`task_console` 通过 `AllocConsole` 创建应用日志终端，结束后保留至退出应用或下次右键任务关闭该选项；禁用终端关闭菜单，防止关闭终端直接终止任务。验证终端闪现时不得给桌面 exe 启动器额外加 `CREATE_NO_WINDOW`，否则会掩盖入口错误。
+
 - 测试：`cargo test --workspace`（集成测试用真实 7z/UnRAR/lz4，外部工具缺失时对应用例自动 skip）
 - CLI 解压：`cargo run --release -p unzip-cli -- <目录> [-o 输出] [--dry-run]`
 - CLI 打包：`cargo run --release -p unzip-cli -- pack <文件/目录…> -o 输出 [--name G198] [--step 1] [--format 7z|zip] [--random-uniform | --password 密码] [--volume-threshold 3 --volume-size 2] [--no-txt] [--txt-template "文案 {date}"] [--mx 5] [--dry-run]`
@@ -84,6 +86,7 @@
 
 - 入口 `run_pack(sources, opts, cfg, cb)`：逐源一个包；核心 `name_mode=legacy` 仍兼容 CLI 的 `name_start` 末尾数字递增。桌面端固定传 `name_mode=parts`，不显示旧起始包名及命名方式选项；旧 localStorage 配置加载时迁移前缀与数字起点。parts 使用可独立启停的前缀、纯数字序号和后缀，宽度保留且溢出加宽；`auto_number` 从 SQLite 中跨目录匹配相同前后缀的 `.7z/.zip/.rar` 包名（含数字卷尾），从最大序号 +step 与用户起点中较大者开始，预览和实际打包共用解析路径，实际开始前重新计算。记录不可读时明确报错；输出撞名仍自动 " (2)" 避让，绝不覆盖旧包。
 - 打包走 `7z a`（Extractor 的 7z 探测与回退链与解压共用）；产物路径必须绝对（7z 的 current_dir 是 temp 暂存目录）。
+- 资源管理器快捷压缩入口 `run_quick_pack`：每个选中项在其父目录创建一个包，文件使用 stem（`文件.txt` → `文件.7z`），文件夹保留完整名称。`Config.quick_pack_format` 默认 `7z`，设置可选 `zip`，`set_quick_pack_format` 校验后只合并该字段；`save_unpack_config` 保留磁盘最新值，避免旧快照覆盖。快捷压缩独立构造选项，`password_mode=none`、不混入 txt、不分卷，沿用集中记录和撞名避让，不修改常规打包表单或 localStorage 偏好。测试：core `quick_pack_*`、Tauri `quick_pack_format_defaults_validates_and_survives_stale_unpack_save`、`app/tests/shell-integration.mjs`。
 - 加密：7z 格式 `-p密码 -mhe=on`（连文件名一起加密），zip 格式 `-p密码 -mem=AES256`；密码模式 random_per_pack / random_uniform / manual，随机密码 16 位字母数字（剔除 0/O、1/I/l 易混淆字符）。
 - 分卷：源内容总大小（压缩后不可预知）> 阈值（默认 3G）→ `-v{大小}g`（默认 2g）。**单文件分卷优化**：启用分卷参数但压缩后只产生一个文件时，自动重命名去除 `.001` 后缀（Test001.7z.001 → Test001.7z），避免假分卷误导。
 - 混淆 txt：输入先硬链接镜像（`link_or_copy`，不占磁盘）到 temp 暂存目录，混入 `资源说明.txt`（模板替换 `{date}` + 8 位随机 hex），cd 进暂存目录打包 `.`——txt 落在压缩包根，同批每包内容唯一 → hash 必然不同（防网盘按 hash 比对），下载者解压可见来源与日期。
@@ -97,8 +100,11 @@
 
 ## 通用压缩包管理与资源管理器入口
 
+- 单实例插件必须最先注册。直接右键动作由 `is_direct_request` 识别，每次从磁盘加载显示偏好：`shell_show_progress` 默认 true（旧配置也默认开启），`shell_show_console` 默认 false；任一开启时 show/unminimize/focus，并取消后台自动退出标志，完成后保留结果。两者均关闭时冷启动隐藏，热启动只转发，不抢焦点。普通启动或添加到列表始终显示应用。`set_shell_display` 只合并这两个字段，`save_unpack_config` 必须保留磁盘最新值，不能被旧解压快照覆盖。`TaskActivity.vue` 显示当前文件、准备状态和实际已用时间，现有外部工具返回前不得虚构包内百分比。App.vue 协调两页队列和 active 状态，队列排空后调用 `finish_shell_requests`，后端再次确认 busy 与待分发队列均空才退出静默后台实例；失败/警告/启动错误仍显示窗口，保留结果和密码重试。用户正常打开的实例不自动退出。`sibling_output` 复用非链接空目录，仍对含内容目录或文件碰撞递增避让，各文件以独占创建方式避免覆盖。测试：Tauri `shell_display_defaults_persist_without_stale_unpack_overwrite`、`app/tests/shell-integration.mjs`；原生测试须覆盖默认显示、保留完成结果、可选终端及下一次右键任务关闭终端。
+
 - `LibraryView.vue` 直接展示集中打包记录，`GameCard.vue` 为保留旧文件名的通用卡片。备注与 `metadata.custom_fields` 保存在集中 SQLite 数据库，字段定义及密码可见性由 `useLibraryFields.ts` 存在本机 localStorage。密码默认隐藏，隐藏时不得将明文放入 DOM 或 title；该设置不加密数据库或 JSON 导出。旧 `version` 只在 `schema_version < 1` 时并入备注，引擎/APK 标记迁入稳定字段 ID，原始属性保留；移除定义不删除字段值。
 - 管理页使用 `query_archive_library` 从 SQLite 加载 24 条一页的记录，数据库负责搜索、字段筛选、排序、匹配计数与全库统计；切换页码或条件时旧请求结果不得覆盖新请求。JSON 备份仍走完整 `load`/`export`，不受分页截断。
 - 字段类型为文本、下拉、勾选。字段 ID 不随名称改变；保存队列捕获条目 ID 和元数据快照，只调用 `update_archive_metadata`。旧目录 JSON 自动尝试导入已知的管理/打包目录，也提供手动导入和备份导出；同路径已有集中记录优先，原文件不修改。切回管理页会刷新集中记录。
-- Windows 右键菜单由 `shell_integration.rs` 按用户设置写入 HKCU 的专属 `UnzipRs.Pack` / `UnzipRs.Unpack` verbs，不自动注册。入口用带引号的 exe 和路径参数直接启动，不经 cmd/PowerShell；单实例插件转发后端队列，前端监听通知再排空，冷启动请求也保留。传统菜单 `MultiSelectModel=Player` 最多 100 项，Windows 11 通常在“显示更多选项”中。
+- Windows 右键菜单由 `shell_integration.rs` 按用户设置写入 HKCU `Software\Classes\*\shell\UnzipRs` / `Directory\shell\UnzipRs`，`MUIVerb=unzip-rs`、空 `SubCommands` 与内部 `shell` 构成二级菜单。启停只清理本应用新键和旧 `UnzipRs.Pack` / `UnzipRs.Unpack`。五个入口：`--shell-extract-here` / `--shell-extract-folder` 直接解压，`--shell-pack-same-name` 直接快捷压缩，`--shell-unpack` / `--shell-pack` 仅加入列表。直接 exe + 引号参数，不经 cmd/PowerShell。单实例转发与冷启动队列交给 App.vue 分发，UnpackView / PackView 注册事件后自动运行；忙时保留排队，停止清空相应页面待执行直接任务。传统 `MultiSelectModel=Player` 最多 100 项，Win11 通常在“显示更多选项”。
+- `start_shell_run` 从磁盘读取已保存 Config，共用密码策略、hash 匹配、failed_dir_enabled 与 busy 互斥，不保存临时源/输出目录。核心 `run_with_layout` 保留默认 Grouped 流程，Here / NamedFolder 在每个包的父目录内暂存，复用完整解压及递归流程，成功后 `sibling_output` 原子预留不重名目录/文件，拒绝覆盖与符号链接；落位异常保留剩余暂存内容并告警。直接模式按实际父路径区分同名包。`PendingRetry` 保留原始输出布局与目录，失败包移入 failed 后重试也回原始目标，且只尝试新密码。测试：`explorer_*`、`sibling_output::tests`、注册表临时键迁移测试、`app/tests/shell-integration.mjs`。
 - `start_run` 的可选 `files` 非空时仅用指定文件/目录作为源根，空数组报错；未传时保留源目录扫描。核心 `scan_sources` 对显式文件只扫描所选文件，不枚举父目录；同目录选中文件合入同一两遍扫描组。显式文件可位于输出目录内，重复根只处理一次。测试锚点：`explicit_files_do_not_scan_unselected_neighbors_and_use_parent_root`、`explicit_main_rar_and_companion_are_grouped_in_both_orders`。

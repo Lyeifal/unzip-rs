@@ -3,6 +3,7 @@ import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref,
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import StyledSelect from "./StyledSelect.vue";
+import TaskActivity from './TaskActivity.vue';
 import type { SelectOption } from "../types/select";
 import { useShellQueue } from '../composables/useShellQueue';
 import { waitForToolPathsSave } from '../composables/useToolPaths';
@@ -30,10 +31,39 @@ const compressionLevelOptions: SelectOption[] = [
 ];
 
 const opts = reactive(defaultPackOptions());
-const items = useShellQueue().packPaths;
+const { packPaths: items, quickPackRequests, quickActive } = useShellQueue();
 const itemSel = ref(-1);
 const running = ref(false);
 const starting = ref(false);
+const quickRun = ref(false);
+let shellReady = false;
+let quickTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleQuickPack() {
+  if (!shellReady || running.value || starting.value || !quickPackRequests.value.length || quickTimer) return;
+  quickTimer = setTimeout(() => { quickTimer = undefined; void startQuickPack(); }, 300);
+}
+async function startQuickPack() {
+  if (!shellReady || running.value || starting.value) return;
+  const paths = quickPackRequests.value.shift();
+  if (!paths) return;
+  const previous = { summary: summary.value, done: done.value, total: total.value, current: current.value };
+  starting.value = true; running.value = true; quickRun.value = true;
+  summary.value = null; done.value = 0; total.value = 0; current.value = `正在准备右键压缩：${paths.join('、')}`;
+  try {
+    await waitForToolPathsSave();
+    const accepted = await invoke<boolean>('start_shell_pack', { paths: [...paths] });
+    if (!accepted) {
+      quickPackRequests.value.unshift(paths);
+      running.value = false; quickRun.value = false;
+      summary.value = previous.summary; done.value = previous.done; total.value = previous.total; current.value = previous.current;
+    } else { appendLog('[右键压缩] 添加到同名压缩包，使用设置中的默认格式，输出到源文件所在目录', 'info'); }
+  } catch (error) {
+    running.value = false; quickRun.value = false;
+    summary.value = previous.summary; done.value = previous.done; total.value = previous.total; current.value = previous.current;
+    appendLog(`[右键压缩失败] ${error}`, 'error');
+    void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
+  } finally { starting.value = false; scheduleQuickPack(); }
+}
 const logs = ref<{ msg: string; level: string }[]>([]);
 const logBox = ref<HTMLElement | null>(null);
 const done = ref(0);
@@ -172,6 +202,7 @@ async function browseOutDir() {
 
 async function start() {
   if (running.value || starting.value) return;
+  quickRun.value = false;
   if (!items.value.length) {
     appendLog("[警告] 请先添加要打包的文件或目录", "warn");
     return;
@@ -205,11 +236,14 @@ async function start() {
 }
 
 async function stop() {
+  quickPackRequests.value = [];
+  if (quickTimer) { clearTimeout(quickTimer); quickTimer = undefined; }
   await invoke("cancel_run");
   appendLog("[警告] 正在停止…", "warn");
 }
 
 function onDone(s: PackSummaryPayload) {
+  if (s.failed.length || s.warns.length) void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
   running.value = false;
   summary.value = s;
   appendLog(
@@ -221,9 +255,10 @@ function onDone(s: PackSummaryPayload) {
   }
 
   // 保存成功的配置（记住目录、密码、模板等）
-  if (s.ok.length > 0) {
+  if (s.ok.length > 0 && !quickRun.value) {
     savePackOptions(opts);
   }
+  quickRun.value = false;
   void refreshPreview();
 
   nextTick(() => {
@@ -247,6 +282,8 @@ async function copyPassword(text: string, idx: number) {
 }
 
 // ---------- 生命周期 ----------
+watch(() => quickPackRequests.value.map(paths => paths.length).join(','), scheduleQuickPack);
+watch(() => running.value || starting.value, (active) => { quickActive.value = active; scheduleQuickPack(); }, { flush: 'sync' });
 
 onMounted(async () => {
   unlisteners.push(
@@ -263,11 +300,15 @@ onMounted(async () => {
     ),
     await listen<PackSummaryPayload>("pack-done", (e) => onDone(e.payload)),
   );
+  shellReady = true;
+  scheduleQuickPack();
 });
 
 onActivated(() => void refreshPreview());
 
 onUnmounted(() => {
+  shellReady = false;
+  if (quickTimer) clearTimeout(quickTimer);
   if (previewTimer) clearTimeout(previewTimer);
   previewToken++;
   for (const u of unlisteners) u();
@@ -278,6 +319,8 @@ onUnmounted(() => {
 <template>
   <div class="page-content">
     <h1 class="title">打包压缩</h1>
+    <TaskActivity :running="running" :current="current" :done="done" :total="total" kind="压缩" />
+    <p v-if="quickPackRequests.length" class="hint" role="status">右键快捷压缩等待中（{{ quickPackRequests.length }} 批），当前任务结束后自动开始。</p>
 
     <!-- 待打包列表 -->
     <section class="glass-card section-card">
@@ -461,7 +504,7 @@ onUnmounted(() => {
         </thead>
         <tbody>
           <tr v-for="(r, i) in summary.ok" :key="i">
-            <td class="mono">{{ r.name }}.{{ opts.format }}</td>
+            <td class="mono">{{ r.outputs?.[0]?.replaceAll('\\', '/')?.split('/').pop() || `${r.name}.${opts.format}` }}</td>
             <td class="mono">
               {{ r.password ?? "（无密码）" }}
               <button v-if="r.password" class="btn copy-btn" @click="copyPassword(r.password!, i)">

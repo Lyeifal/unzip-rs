@@ -1,7 +1,7 @@
 {
   "name": "unzip-app",
   "private": true,
-  "version": "0.1.26101801",
+  "version": "0.1.26101901",
   "type": "module",
   "scripts": {
     "dev": "vite",

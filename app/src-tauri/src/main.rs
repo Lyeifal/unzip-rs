@@ -1,10 +1,12 @@
 //! unzip-rs — Tauri v2 外壳。
 //! 启动时解析 app_data_dir，设 UNZIP_CONFIG_PATH / UNZIP_BUNDLED_DIR。
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Explorer can invoke debug builds too: allocating a console here flashes before main().
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod shell_integration;
 mod tool_settings;
+mod task_console;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use unzip_core::config::{load_config_from, Config};
 use unzip_core::pack::{run_pack, PackOptions, PackSummary};
 use unzip_core::types::{LogLevel, RetryableFailure, RunCallback, Summary};
+use unzip_core::pipeline::{run_with_layout, retry_with_layout, OutputLayout};
+
+struct PendingRetry {
+    failure: RetryableFailure,
+    output_root: PathBuf,
+    layout: OutputLayout,
+}
 
 struct AppState {
     config_path: PathBuf,
@@ -23,7 +32,7 @@ struct AppState {
     busy: Arc<AtomicBool>,
     /// 取消标志：停止按钮置位，run 循环的 should_cancel 读取。
     cancel: Arc<AtomicBool>,
-    retryable: Arc<Mutex<Vec<Option<RetryableFailure>>>>,
+    retryable: Arc<Mutex<Vec<Option<PendingRetry>>>>,
     update_pending: AtomicBool,
 }
 
@@ -46,6 +55,7 @@ struct TauriCallback {
 
 impl RunCallback for TauriCallback {
     fn on_log(&self, msg: &str, level: LogLevel) {
+        task_console::log(msg);
         let event = format!("{}-log", self.event_prefix);
         let _ = self
             .app
@@ -53,6 +63,7 @@ impl RunCallback for TauriCallback {
     }
 
     fn on_progress(&self, done: usize, total: usize, name: &str) {
+        task_console::log(&format!("[进度] {done}/{total}：{name}"));
         let event = format!("{}-progress", self.event_prefix);
         let _ = self.app.emit(
             &event,
@@ -102,6 +113,19 @@ fn load_config(state: State<'_, AppState>) -> Config {
 #[tauri::command]
 fn save_config(state: State<'_, AppState>, cfg: Config) -> bool {
     tool_settings::save_unpack_config(&state.config_path, cfg)
+}
+
+/// Direct Explorer actions reuse a running instance without stealing focus.
+/// An instance started for a direct action exits after all frontend/backend work drains.
+#[tauri::command]
+fn finish_shell_requests(app: AppHandle, state: State<'_, AppState>, reveal: bool) {
+    if reveal { shell_integration::show_main(&app); return; }
+    if load_config_from(&state.config_path).shell_show_console { return; }
+    let shell = app.state::<shell_integration::ShellState>();
+    let pending = shell.0.lock().unwrap_or_else(|p| p.into_inner());
+    if shell.1.load(Ordering::SeqCst) && !state.busy.load(Ordering::SeqCst) && pending.is_empty() {
+        app.exit(0);
+    }
 }
 
 #[tauri::command]
@@ -238,12 +262,37 @@ fn start_run(
     if output_dir.trim().is_empty() {
         return Err("请先选择解压输出目录".to_string());
     }
-    if state.busy.swap(true, Ordering::SeqCst) {
-        return Err("已有解压任务正在进行中".to_string());
-    }
-
     let cfg = load_config_from(&state.config_path);
-    let out = PathBuf::from(output_dir.trim());
+    let accepted = launch_unpack(app, &state, sources, PathBuf::from(output_dir.trim()), failed_dir, cfg, OutputLayout::Grouped)?;
+    if !accepted { return Err("已有压缩、解压或更新任务正在进行中".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+fn start_shell_run(
+    app: AppHandle, state: State<'_, AppState>, action: String, paths: Vec<String>,
+) -> Result<bool, String> {
+    let layout = match action.as_str() {
+        "extract-here" => OutputLayout::Here,
+        "extract-folder" => OutputLayout::NamedFolder,
+        _ => return Err("不支持的右键解压操作".into()),
+    };
+    let sources = collect_unpack_sources("", Some(paths), Some("selected"))?;
+    let out = if sources[0].is_dir() { sources[0].clone() }
+        else { sources[0].parent().ok_or("无法确定压缩包所在目录")?.to_path_buf() };
+    let cfg = load_config_from(&state.config_path);
+    let failed_dir = cfg.failed_dir.clone();
+    launch_unpack(app, &state, sources, out, failed_dir, cfg, layout)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_unpack(
+    app: AppHandle, state: &AppState, sources: Vec<PathBuf>, out: PathBuf,
+    failed_dir: String, cfg: Config, layout: OutputLayout,
+) -> Result<bool, String> {
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
     let failed = if failed_dir.trim().is_empty() {
         out.join("failed")
     } else {
@@ -269,7 +318,7 @@ fn start_run(
             cancel,
             event_prefix: "uz",
         };
-        let summary = unzip_core::run(
+        let summary = run_with_layout(
             &sources,
             &out,
             cfg.failed_dir_enabled.then_some(failed.as_path()),
@@ -278,15 +327,18 @@ fn start_run(
             &cb,
             false,
             recursive,
+            layout,
         );
+        task_console::log(&format!("[完成] 解压成功 {}，失败 {}，跳过 {}，警告 {}", summary.ok.len(), summary.failed.len(), summary.skipped.len(), summary.warns.len()));
         if let Ok(mut pending) = retryable.lock() {
-            *pending = summary.retryable.iter().map(|r| Some(RetryableFailure {
-                name: r.name.clone(), paths: r.paths.clone(), failed_index: r.failed_index,
+            *pending = summary.retryable.iter().map(|r| Some(PendingRetry {
+                failure: RetryableFailure { name: r.name.clone(), paths: r.paths.clone(), failed_index: r.failed_index, source_parent: r.source_parent.clone() },
+                output_root: if layout == OutputLayout::Grouped { out.clone() } else { r.source_parent.clone() }, layout,
             })).collect();
         }
         let _ = app.emit("uz-done", summary_payload(&summary));
     });
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]
@@ -298,15 +350,15 @@ fn retry_unpack_password(
     output_dir: String,
 ) -> Result<(), String> {
     if password.is_empty() { return Err("请输入新密码".into()); }
-    if output_dir.trim().is_empty() { return Err("请先选择解压输出目录".into()); }
+    let _ = output_dir; // Retry uses the original job's output and layout, including Explorer jobs.
     if state.busy.swap(true, Ordering::SeqCst) {
         return Err("已有解压任务正在进行中".into());
     }
     let target = match state.retryable.lock() {
-        Ok(pending) => pending.get(slot).and_then(|r| r.as_ref()).map(|r| (r.paths.clone(), r.failed_index)),
+        Ok(pending) => pending.get(slot).and_then(|r| r.as_ref()).map(|r| (r.failure.paths.clone(), r.failure.failed_index, r.output_root.clone(), r.layout)),
         Err(_) => None,
     };
-    let Some((paths, failed_index)) = target else {
+    let Some((paths, failed_index, out, layout)) = target else {
         state.busy.store(false, Ordering::SeqCst);
         return Err("该任务已不可重试，请重新扫描".into());
     };
@@ -323,17 +375,17 @@ fn retry_unpack_password(
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
     let pending = state.retryable.clone();
-    let out = PathBuf::from(output_dir.trim());
     cancel.store(false, Ordering::SeqCst);
     std::thread::spawn(move || {
         let _guard = BusyGuard(busy);
         let cb = TauriCallback { app: app.clone(), cancel, event_prefix: "uz" };
-        let mut summary = unzip_core::run(&paths, &out, None, cfg, vec![password.clone()], &cb, false, false);
+        let mut summary = retry_with_layout(&paths, &out, cfg, vec![password.clone()], &cb, layout);
         if let Ok(mut entries) = pending.lock() {
             if let Some(entry) = entries.get_mut(slot) {
                 if !summary.ok.is_empty() || !summary.failed.is_empty() {
-                    *entry = summary.retryable.first().map(|r| RetryableFailure {
-                        name: r.name.clone(), paths: r.paths.clone(), failed_index,
+                    *entry = summary.retryable.first().map(|r| PendingRetry {
+                        failure: RetryableFailure { name: r.name.clone(), paths: r.paths.clone(), failed_index, source_parent: out.clone() },
+                        output_root: out.clone(), layout,
                     });
                 }
             }
@@ -446,6 +498,61 @@ async fn preview_pack_names(options: PackOptions, count: usize) -> Result<Vec<St
 }
 
 #[tauri::command]
+fn get_quick_pack_format(state: State<'_, AppState>) -> String {
+    match load_config_from(&state.config_path).quick_pack_format.as_str() { "zip" => "zip", _ => "7z" }.into()
+}
+
+fn save_quick_pack_format(path: &Path, format: &str) -> Result<String, String> {
+    if !matches!(format, "7z" | "zip") { return Err("快捷压缩仅支持 7z / zip".into()); }
+    if !unzip_core::config::update_config_to(path, |cfg| cfg.quick_pack_format = format.into()) {
+        return Err("快捷压缩设置保存失败，请检查配置目录的写入权限或磁盘空间".into());
+    }
+    Ok(format.into())
+}
+
+#[tauri::command]
+fn set_quick_pack_format(state: State<'_, AppState>, format: String) -> Result<String, String> {
+    save_quick_pack_format(&state.config_path, &format)
+}
+
+#[tauri::command]
+fn get_shell_display(state: State<'_, AppState>) -> Value {
+    let cfg = load_config_from(&state.config_path);
+    json!({"showProgress": cfg.shell_show_progress, "showConsole": cfg.shell_show_console})
+}
+
+fn save_shell_display(path: &Path, show_progress: bool, show_console: bool) -> Result<(), String> {
+    if !unzip_core::config::update_config_to(path, |cfg| {
+        cfg.shell_show_progress = show_progress; cfg.shell_show_console = show_console;
+    }) { return Err("右键任务显示设置保存失败，请检查写入权限或磁盘空间".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_shell_display(state: State<'_, AppState>, show_progress: bool, show_console: bool) -> Result<(), String> {
+    save_shell_display(&state.config_path, show_progress, show_console)
+}
+
+#[tauri::command]
+fn start_shell_pack(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<bool, String> {
+    let sources = collect_unpack_sources("", Some(paths), Some("selected"))?;
+    let cfg = load_config_from(&state.config_path);
+    let format = if cfg.quick_pack_format == "zip" { "zip" } else { "7z" };
+    if state.busy.swap(true, Ordering::SeqCst) { return Ok(false); }
+    let busy = state.busy.clone();
+    let cancel = state.cancel.clone();
+    cancel.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _guard = BusyGuard(busy);
+        let cb = TauriCallback { app: app.clone(), cancel, event_prefix: "pack" };
+        let summary = unzip_core::pack::run_quick_pack(&sources, format, &cfg, &cb);
+        task_console::log(&format!("[完成] 压缩成功 {}，失败 {}，警告 {}", summary.ok.len(), summary.failed.len(), summary.warns.len()));
+        let _ = app.emit("pack-done", pack_summary_payload(&summary));
+    });
+    Ok(true)
+}
+
+#[tauri::command]
 async fn load_archive_library() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
         Ok(json!({"path": unzip_core::archive_catalog::database_path(), "catalog": unzip_core::archive_catalog::load()?}))
@@ -526,19 +633,19 @@ async fn export_archive_library() -> Result<Option<String>, String> {
 }
 
 fn main() {
+    let startup_args = std::env::args().collect::<Vec<_>>();
+    let background = shell_integration::is_direct_request(&startup_args);
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
-        .manage(shell_integration::ShellState::default())
+        .manage(shell_integration::ShellState(Mutex::new(Vec::new()), AtomicBool::new(background)))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             shell_integration::enqueue(app, &args, Path::new(&cwd));
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
+            if !shell_integration::is_direct_request(&args) {
+                shell_integration::show_main(app);
             }
         }))
-        .setup(|app| {
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .setup(move |app| {
             let app_data = app.path().app_data_dir()?;
             let local_data = app.path().app_local_data_dir()?;
             let legacy = unzip_core::storage::LEGACY_APP_DIR_NAME;
@@ -570,7 +677,8 @@ fn main() {
                 &std::env::args().collect::<Vec<_>>(),
                 &std::env::current_dir().unwrap_or_default(),
             );
-            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?.build()?;
+            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .visible(!app.state::<shell_integration::ShellState>().1.load(Ordering::SeqCst)).build()?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -584,9 +692,15 @@ fn main() {
             pick_files,
             pick_directories_multi,
             start_run,
+            start_shell_run,
             retry_unpack_password,
             cancel_run,
             start_pack,
+            start_shell_pack,
+            get_quick_pack_format,
+            set_quick_pack_format,
+            get_shell_display,
+            set_shell_display,
             preview_pack_names,
             load_archive_library,
             query_archive_library,
@@ -596,6 +710,7 @@ fn main() {
             shell_integration::get_shell_integration,
             shell_integration::set_shell_integration,
             shell_integration::take_shell_requests,
+            finish_shell_requests,
         ])
         .run(tauri::generate_context!())
         .expect("运行 unzip-rs 失败");
@@ -604,6 +719,52 @@ fn main() {
 #[cfg(test)]
 mod unpack_sources_tests {
     use super::collect_unpack_sources;
+
+    #[test]
+    fn shell_display_defaults_persist_without_stale_unpack_overwrite() {
+        use unzip_core::config::load_config_from;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, r#"{"passwords":["keep"],"quick_pack_format":"zip"}"#).unwrap();
+        let stale = load_config_from(&path);
+        assert!(stale.shell_show_progress);
+        assert!(!stale.shell_show_console);
+        super::save_shell_display(&path, false, true).unwrap();
+        let current = load_config_from(&path);
+        assert!(!current.shell_show_progress);
+        assert!(current.shell_show_console);
+        assert_eq!(current.passwords, ["keep"]);
+        assert_eq!(current.quick_pack_format, "zip");
+        assert!(super::tool_settings::save_unpack_config(&path, stale));
+        let current = load_config_from(&path);
+        assert!(!current.shell_show_progress);
+        assert!(current.shell_show_console);
+        assert!(super::save_shell_display(&temp.path().join("missing/config.json"), true, false).is_err());
+    }
+
+    #[test]
+    fn quick_pack_format_defaults_validates_and_survives_stale_unpack_save() {
+        use unzip_core::config::{load_config_from, save_config_to, Config};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        assert_eq!(load_config_from(&path).quick_pack_format, "7z");
+        std::fs::write(&path, r#"{"passwords":["keep"],"output_dir":"unchanged"}"#).unwrap();
+        let stale = load_config_from(&path);
+        assert_eq!(stale.quick_pack_format, "7z");
+        assert_eq!(super::save_quick_pack_format(&path, "zip").unwrap(), "zip");
+        let loaded = load_config_from(&path);
+        assert_eq!(loaded.quick_pack_format, "zip");
+        assert_eq!(loaded.passwords, ["keep"]);
+        assert_eq!(loaded.output_dir, "unchanged");
+        assert!(super::tool_settings::save_unpack_config(&path, stale));
+        assert_eq!(load_config_from(&path).quick_pack_format, "zip");
+        let before = std::fs::read(&path).unwrap();
+        assert!(super::save_quick_pack_format(&path, "rar").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(super::save_quick_pack_format(&temp.path().join("missing/config.json"), "7z").is_err());
+        assert!(save_config_to(&Config::default(), &path));
+        assert_eq!(load_config_from(&path).quick_pack_format, "7z");
+    }
 
     #[test]
     fn update_install_never_unlocks_an_active_archive_task() {

@@ -795,7 +795,8 @@ fn extract_package(
             let _ = fs::remove_dir_all(&dest);
             let retry_paths = move_to_failed(pkg, ctx, summary);
             if err.starts_with("密码不匹配：") && retry_paths.iter().all(|p| p.is_file()) {
-                summary.retryable.push(RetryableFailure { name: pkg.name.clone(), paths: retry_paths, failed_index: summary.failed.len() });
+                summary.retryable.push(RetryableFailure { name: pkg.name.clone(), paths: retry_paths, failed_index: summary.failed.len(),
+                    source_parent: pkg.first.parent().unwrap_or(Path::new(".")).to_path_buf() });
             }
             summary.failed.push((pkg.name.clone(), err.clone()));
             ctx.cb.on_log(
@@ -857,6 +858,14 @@ fn dedup_key(pkg: &Package) -> Option<(String, String, String)> {
     Some((ascii_lc(&pkg.group_key()), ascii_lc(&pkg.name), parent))
 }
 
+fn layout_dedup_key(pkg: &Package, layout: OutputLayout) -> Option<(String, String, String)> {
+    let mut key = dedup_key(pkg)?;
+    if layout != OutputLayout::Grouped {
+        key.2 = ascii_lc(&crate::types::normalize(pkg.first.parent().unwrap_or(Path::new("."))).to_string_lossy());
+    }
+    Some(key)
+}
+
 /// 与 pkg 同组且会实际产出的包数：未领养、去重集只算一份（首个成功/失败兜底都恰好产出一份），
 /// 产物逐个计数。决定 dest 落位 out/<组>/<名> 还是 out/<组>。
 fn alive_count(pkgs: &[Package], pkg: &Package, scan: &ScanResult) -> usize {
@@ -873,22 +882,57 @@ fn alive_count(pkgs: &[Package], pkg: &Package, scan: &ScanResult) -> usize {
 }
 
 /// 扫描 → 建包 → 预组装（领养改名卷）→ 分组 → 逐包解压。返回 Summary。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputLayout {
+    #[default]
+    Grouped,
+    /// Each archive's parent directory; extraction is isolated before publishing.
+    Here,
+    /// A new folder named for each archive, beside that archive.
+    NamedFolder,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     source_roots: &[PathBuf],
     out_root: &Path,
     failed_root: Option<&Path>,
-    mut cfg: Config,
+    cfg: Config,
     passwords: Vec<String>,
     cb: &dyn RunCallback,
     dry_run: bool,
     recursive: bool,
 ) -> Summary {
+    run_with_layout(source_roots, out_root, failed_root, cfg, passwords, cb, dry_run, recursive, OutputLayout::Grouped)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_layout(
+    source_roots: &[PathBuf], out_root: &Path, failed_root: Option<&Path>, cfg: Config,
+    passwords: Vec<String>, cb: &dyn RunCallback, dry_run: bool, recursive: bool, layout: OutputLayout,
+) -> Summary {
+    run_impl(source_roots, out_root, failed_root, cfg, passwords, cb, dry_run, recursive, layout, None)
+}
+
+/// Retry a single failed archive at its original destination, even after relocation.
+#[allow(clippy::too_many_arguments)]
+pub fn retry_with_layout(
+    sources: &[PathBuf], out: &Path, cfg: Config, passwords: Vec<String>, cb: &dyn RunCallback, layout: OutputLayout,
+) -> Summary {
+    run_impl(sources, out, None, cfg, passwords, cb, false, false, layout, Some(out))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_impl(
+    source_roots: &[PathBuf], out_root: &Path, failed_root: Option<&Path>, mut cfg: Config,
+    passwords: Vec<String>, cb: &dyn RunCallback, dry_run: bool, recursive: bool, layout: OutputLayout,
+    destination_override: Option<&Path>,
+) -> Summary {
     let failed_root = failed_root.filter(|_| cfg.failed_dir_enabled);
     let _ = fs::create_dir_all(out_root);
     let ex = Extractor::new(&cfg, None);
     let mut summary = Summary::default();
-    let mut scan = scan_sources(source_roots, recursive, &cfg, Some(out_root), failed_root);
+    let mut scan = scan_sources(source_roots, recursive, &cfg, (layout == OutputLayout::Grouped).then_some(out_root), failed_root);
     for (f, reason) in &scan.skips {
         summary.skipped.push((file_name(f), reason.clone()));
         cb.on_log(
@@ -913,7 +957,7 @@ pub fn run(
             if is_adopted(pkg, &scan) || pkg.vol_family.is_none() {
                 continue;
             }
-            if let Some(k) = dedup_key(pkg) {
+            if let Some(k) = layout_dedup_key(pkg, layout) {
                 if !seen_pre.insert(k) {
                     continue;
                 }
@@ -964,7 +1008,7 @@ pub fn run(
         // 同组同名去重：a.zip + a.rar 这类同 stem 双格式只解第一个，
         // 避免同一内容解出 out/a/a 与 out/a/a (2) 两份（源文件不动；只解一份为有意设计）。
         // 只在首个包成功后才登记：首个若解压失败，允许后续同名格式兜底重试。
-        let dedup_key = dedup_key(&pkgs[i]);
+        let dedup_key = layout_dedup_key(&pkgs[i], layout);
         if !dry_run && dedup_key.as_ref().is_some_and(|k| seen_names.contains(k)) {
             let name = file_name(&pkgs[i].first);
             let reason = "同组同名包已处理，疑似重复格式，已跳过".to_string();
@@ -974,12 +1018,30 @@ pub fn run(
             continue;
         }
         let alive = alive_count(&pkgs, &pkgs[i], &scan);
-        let dest_base = if alive > 1 {
+        // Odd filenames such as "...zip" have stem "..". Never let a stem escape staging.
+        let stage_name = if matches!(pkgs[i].name.as_str(), "" | "." | "..") { "archive" } else { &pkgs[i].name };
+        let parent = destination_override.unwrap_or_else(|| pkgs[i].first.parent().unwrap_or(Path::new("."))).to_path_buf();
+        let stage = if layout != OutputLayout::Grouped && !dry_run {
+            match tempfile::Builder::new().prefix(".unzip-rs-").tempdir_in(&parent) {
+                Ok(stage) => Some(stage),
+                Err(error) => {
+                    summary.failed.push((pkgs[i].name.clone(), format!("创建解压暂存目录失败：{error}")));
+                    cb.on_progress(i + 1, total, &file_name(&pkgs[i].first));
+                    continue;
+                }
+            }
+        } else { None };
+        let dest_base = if let Some(stage) = &stage {
+            stage.path().join(stage_name)
+        } else if layout != OutputLayout::Grouped {
+            if layout == OutputLayout::Here { parent.to_path_buf() } else { parent.join(&pkgs[i].name) }
+        } else if alive > 1 {
             out_root.join(pkgs[i].group_key()).join(&pkgs[i].name)
         } else {
             out_root.join(pkgs[i].group_key())
         };
         pkgs[i].dest_base = Some(dest_base);
+        let staged_output = pkgs[i].dest_base.clone();
         let name = file_name(&pkgs[i].first);
         cb.on_progress(i, total, &name);
         if !dry_run && pkgs[i].kind != PkgKind::Product {
@@ -1003,7 +1065,7 @@ pub fn run(
             failed_root: failed_root.map(|p| p.to_path_buf()),
             cb,
         };
-        let ok = extract_package(
+        let mut ok = extract_package(
             &ex,
             &pkgs[i],
             &mut cfg,
@@ -1013,6 +1075,22 @@ pub fn run(
             dry_run,
             pre.remove(&i),
         );
+        if ok {
+            if let Some(stage) = stage {
+                let staged = staged_output.as_ref().expect("package output assigned above");
+                match crate::sibling_output::publish(&staged, &parent, layout == OutputLayout::NamedFolder) {
+                    Ok(destination) => cb.on_log(&format!("[输出] {} → {}", name, destination.display()), LogLevel::Ok),
+                    Err(error) => {
+                        ok = false;
+                        let recovery = stage.keep();
+                        summary.ok.pop();
+                        let reason = format!("解压产物落位失败：{error}；未落位的内容保留于 {}", recovery.display());
+                        cb.on_log(&reason, LogLevel::Error);
+                        summary.failed.push((pkgs[i].name.clone(), reason));
+                    }
+                }
+            }
+        }
         if ok && !dry_run {
             if let Some(k) = dedup_key {
                 seen_names.insert(k);
@@ -1151,6 +1229,204 @@ mod tests {
     }
 
     // ---------- 纯函数单测 ----------
+    #[test]
+    fn explorer_single_folder_has_no_extension_or_spurious_counter() {
+        if !have_tools(&[SEVENZ]) { return; }
+        for layout in [OutputLayout::Here, OutputLayout::NamedFolder] {
+            for empty_exists in [false, true] {
+                let tmp = tempdir().unwrap();
+                let src = tmp.path().join("archives");
+                let work = tmp.path().join("work");
+                fs::create_dir_all(&src).unwrap();
+                fs::create_dir_all(work.join("资料")).unwrap();
+                fs::write(work.join("资料/readme.txt"), b"keep content").unwrap();
+                let archive = src.join("资料.7z");
+                sh(Command::new(SEVENZ).args(["a", "-t7z"]).arg(&archive).arg("资料").current_dir(&work));
+                if empty_exists { fs::create_dir(src.join("资料")).unwrap(); }
+                let cb = Collect::new();
+                let summary = run_with_layout(&[archive.clone()], &src, None, tool_cfg(&[]), vec![], &cb, false, false, layout);
+                assert_eq!(summary.ok.len(), 1, "{:?} {:?}", summary.failed, cb.all());
+                let output = if layout == OutputLayout::Here { src.join("readme.txt") } else { src.join("资料/readme.txt") };
+                assert_eq!(fs::read(output).unwrap(), b"keep content");
+                assert!(!src.join("资料 (2)").exists());
+                assert!(!src.join("资料.7z (2)").exists());
+                assert!(archive.is_file());
+            }
+        }
+    }
+    #[test]
+    fn explorer_layouts_use_saved_rules_and_preserve_neighbors() {
+        if !have_tools(&[SEVENZ]) { return; }
+        for layout in [OutputLayout::Here, OutputLayout::NamedFolder] {
+            let tmp = tempdir().unwrap();
+            let src = tmp.path().join("中文 空格 & archives");
+            let work = tmp.path().join("work");
+            fs::create_dir_all(&src).unwrap();
+            fs::create_dir_all(&work).unwrap();
+            fs::write(work.join("hello.txt"), b"extracted").unwrap();
+            let archive = src.join("secret.zip");
+            sh(Command::new(SEVENZ).args(["a", "-tzip", "-prule-secret"]).arg(&archive).arg("hello.txt").current_dir(&work));
+            fs::copy(&archive, src.join("unselected.zip")).unwrap();
+            fs::write(src.join("hello.txt"), b"existing").unwrap();
+            fs::create_dir(src.join("secret")).unwrap();
+            fs::write(src.join("secret/keep.txt"), b"keep existing content").unwrap();
+            let original = fs::read(&archive).unwrap();
+            let mut cfg = tool_cfg(&["wrong-library-password"]);
+            cfg.failed_dir_enabled = false;
+            cfg.password_rules = vec![
+                PasswordRule { suffix: ".zip".into(), keyword: String::new(), passwords: vec!["rule-secret".into()], enabled: false },
+                PasswordRule { suffix: ".zip".into(), keyword: String::new(), passwords: vec!["rule-secret".into()], enabled: true },
+            ];
+            let cb = Collect::new();
+            let summary = run_with_layout(&[archive.clone()], &src, None, cfg, vec![], &cb, false, true, layout);
+            assert_eq!(summary.ok.len(), 1, "{:?} {:?}", summary.failed, cb.all());
+            assert!(summary.failed.is_empty());
+            assert_eq!(fs::read(src.join("hello.txt")).unwrap(), b"existing");
+            let output = if layout == OutputLayout::Here { src.join("hello (2).txt") } else { src.join("secret (2)/hello.txt") };
+            assert_eq!(fs::read(output).unwrap(), b"extracted");
+            assert_eq!(fs::read(&archive).unwrap(), original);
+            assert!(src.join("unselected.zip").is_file());
+            assert!(!src.join("unselected").exists());
+            assert!(!fs::read_dir(&src).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".unzip-rs-")));
+        }
+    }
+
+    #[test]
+    fn explorer_password_failure_preserves_files_and_retry_keeps_original_destination() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let work = tmp.path().join("work");
+        let failed = tmp.path().join("failed");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("hello.txt"), b"extracted").unwrap();
+        let archive = src.join("secret.zip");
+        sh(Command::new(SEVENZ).args(["a", "-tzip", "-prule-secret"]).arg(&archive).arg("hello.txt").current_dir(&work));
+        fs::write(src.join("hello.txt"), b"keep").unwrap();
+        let mut cfg = tool_cfg(&["wrong"]);
+        cfg.failed_dir_enabled = false;
+        cfg.password_rules = vec![PasswordRule { suffix: ".zip".into(), keyword: String::new(), passwords: vec!["rule-secret".into()], enabled: false }];
+        let cb = Collect::new();
+        let first = run_with_layout(&[archive.clone()], &src, Some(&failed), cfg.clone(), vec![], &cb, false, false, OutputLayout::Here);
+        assert_eq!(first.retryable.len(), 1, "{:?}", first.failed);
+        assert!(archive.is_file());
+        assert!(!failed.exists());
+        assert_eq!(fs::read(src.join("hello.txt")).unwrap(), b"keep");
+        assert!(!src.join("hello (2).txt").exists());
+        cfg.failed_dir_enabled = true;
+        let moved = run_with_layout(&[archive.clone()], &src, Some(&failed), cfg.clone(), vec![], &cb, false, false, OutputLayout::NamedFolder);
+        assert_eq!(moved.retryable.len(), 1);
+        assert!(!archive.exists());
+        assert!(failed.join("secret.zip").is_file());
+        assert_eq!(moved.retryable[0].source_parent, src);
+        cfg.retry_password_only = true;
+        let retried = retry_with_layout(&moved.retryable[0].paths, &src, cfg, vec!["rule-secret".into()], &cb, OutputLayout::NamedFolder);
+        assert_eq!(retried.ok.len(), 1, "{:?}", retried.failed);
+        assert_eq!(fs::read(src.join("secret/hello.txt")).unwrap(), b"extracted");
+        assert!(!failed.join("secret").exists());
+    }
+
+    #[test]
+    fn explorer_directory_layout_handles_archives_in_different_subdirectories() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("payload.txt"), b"content").unwrap();
+        for sub in ["a", "b"] {
+            fs::create_dir_all(src.join(sub)).unwrap();
+            sh(Command::new(SEVENZ).args(["a", "-tzip"]).arg(src.join(sub).join("same.zip")).arg("payload.txt").current_dir(&work));
+        }
+        let summary = run_with_layout(&[src.join("a/same.zip"), src.join("b/same.zip")], &src, None, tool_cfg(&[]), vec![], &Collect::new(), false, true, OutputLayout::NamedFolder);
+        assert_eq!(summary.ok.len(), 2, "{:?}", summary.failed);
+        for sub in ["a", "b"] { assert_eq!(fs::read(src.join(sub).join("same/payload.txt")).unwrap(), b"content"); }
+        let scanned = run_with_layout(&[src.clone()], &src, None, tool_cfg(&[]), vec![], &Collect::new(), false, true, OutputLayout::Here);
+        assert_eq!(scanned.ok.len(), 2, "{:?}", scanned.failed);
+        for sub in ["a", "b"] { assert_eq!(fs::read(src.join(sub).join("payload.txt")).unwrap(), b"content"); }
+    }
+
+    #[test]
+    fn explorer_hash_match_decrypts_a_renamed_archive_without_library_password() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let _lock = crate::archive_catalog::CATALOG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 { std::env::set_var("UNZIP_CATALOG_PATH", value); }
+                else { std::env::remove_var("UNZIP_CATALOG_PATH"); }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("UNZIP_CATALOG_PATH"));
+        let tmp = tempdir().unwrap();
+        let catalog = tmp.path().join("pack_mapping.json");
+        std::env::set_var("UNZIP_CATALOG_PATH", &catalog);
+        let src = tmp.path().join("src");
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("payload.txt"), b"hash matched").unwrap();
+        let archive = src.join("renamed.zip");
+        sh(Command::new(SEVENZ).args(["a", "-tzip", "-phash-secret"]).arg(&archive).arg("payload.txt").current_dir(&work));
+        let cb = Collect::new();
+        let hash = crate::archive_hash::hash_file(&archive, &cb).unwrap();
+        let data = serde_json::json!({
+            "schema_version": 2, "mappings": [{
+                "record_id": "old/location/original.zip", "archive_name": "original.zip",
+                "source_name": "payload.txt", "password": "hash-secret",
+                "created_at": "2026-10-18", "source_size": {"bytes": 12},
+                "compressed_size": {"bytes": hash.size_bytes}, "compression_ratio": "0%",
+                "output_hashes": [hash]
+            }]
+        });
+        fs::write(&catalog, serde_json::to_vec(&data).unwrap()).unwrap();
+        let mut cfg = tool_cfg(&[]);
+        cfg.hash_match = true;
+        let summary = run_with_layout(&[archive], &src, None, cfg, vec![], &cb, false, false, OutputLayout::Here);
+        assert_eq!(summary.ok.len(), 1, "{:?} {:?}", summary.failed, cb.all());
+        assert_eq!(fs::read(src.join("payload.txt")).unwrap(), b"hash matched");
+        assert!(catalog.with_extension("sqlite3").is_file());
+    }
+
+    #[test]
+    fn explorer_multivolume_selection_extracts_once_and_keeps_all_source_parts() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        let payload = random_bytes(180 * 1024, 53);
+        fs::write(work.join("payload.bin"), &payload).unwrap();
+        sh(Command::new(SEVENZ).args(["a", "-t7z", "-pvolume-secret", "-mhe=on", "-v64k"])
+            .arg(src.join("split.7z")).arg("payload.bin").current_dir(&work));
+        let mut parts: Vec<_> = fs::read_dir(&src).unwrap().map(|e| e.unwrap().path()).collect();
+        parts.sort();
+        assert!(parts.len() >= 2);
+        let before = snapshot(&src);
+        let summary = run_with_layout(&parts, &src, None, tool_cfg(&["volume-secret"]), vec![], &Collect::new(), false, false, OutputLayout::NamedFolder);
+        assert_eq!(summary.ok.len(), 1, "{:?}", summary.failed);
+        assert_eq!(fs::read(src.join("split/payload.bin")).unwrap(), payload);
+        for (name, size) in before { assert_eq!(src.join(name).metadata().unwrap().len(), size); }
+    }
+
+    #[test]
+    fn explorer_unusual_stem_stays_inside_staging() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let work = tmp.path().join("work");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("payload.txt"), b"preserved").unwrap();
+        let archive = src.join("...zip");
+        sh(Command::new(SEVENZ).args(["a", "-tzip"]).arg(&archive).arg("payload.txt").current_dir(&work));
+        let summary = run_with_layout(&[archive.clone()], &src, None, tool_cfg(&[]), vec![], &Collect::new(), false, false, OutputLayout::NamedFolder);
+        assert_eq!(summary.ok.len(), 1, "{:?}", summary.failed);
+        assert_eq!(fs::read(src.join("archive/payload.txt")).unwrap(), b"preserved");
+        assert!(archive.is_file());
+    }
 
     #[test]
     fn unique_dir_appends_counter() {

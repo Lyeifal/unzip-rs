@@ -40,10 +40,14 @@ pub fn save_unpack_config(path: &Path, cfg: unzip_core::config::Config) -> bool 
             latest.unrar.clone(),
             latest.lz4.clone(),
         );
+        let quick_pack_format = latest.quick_pack_format.clone();
+        let shell_display = (latest.shell_show_progress, latest.shell_show_console);
         *latest = cfg;
         latest.seven_zip = seven_zip;
         latest.unrar = unrar;
         latest.lz4 = lz4;
+        latest.quick_pack_format = quick_pack_format;
+        (latest.shell_show_progress, latest.shell_show_console) = shell_display;
     })
 }
 

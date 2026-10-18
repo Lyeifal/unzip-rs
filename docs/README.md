@@ -10,6 +10,7 @@
 | [界面与设置](./UI_REDESIGN.md) | 主题、壁纸、文字对比度、卡片透明度、共用工具和管理字段 |
 | [压缩记录格式](./PACK_MAPPING.md) | 字段、哈希密码匹配、导入导出、合并与恢复 |
 | [数据存储与 SQLite 迁移](./STORAGE.md) | 配置、记录和 WebView 偏好的位置；SQLite 迁移、备份及体积取舍 |
+| [MCP 与 Agent Skill](../integrations/README.md) | 独立 MCP 服务、Codex / Claude Code / OpenCode 接入、skill 与分发包 |
 | [JSON 示例](./examples/pack_mapping_example.json) | 展示单文件、分卷和旧字段兼容的虚构数据；不对应实际压缩文件 |
 
 ## 开发与维护

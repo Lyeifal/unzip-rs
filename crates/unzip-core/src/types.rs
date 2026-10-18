@@ -165,6 +165,8 @@ pub struct RetryableFailure {
     pub name: String,
     pub paths: Vec<PathBuf>,
     pub failed_index: usize,
+    /// Original archive directory, retained even when failures are relocated.
+    pub source_parent: PathBuf,
 }
 
 /// 日志级别，as_str() 措辞固定（前端按此着色）。

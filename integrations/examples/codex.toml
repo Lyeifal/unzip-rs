@@ -1,0 +1,6 @@
+# Merge this table into ~/.codex/config.toml. Replace the executable path.
+[mcp_servers.unzip_rs]
+command = "C:/tools/unzip-rs-mcp/unzip-mcp.exe"
+args = []
+startup_timeout_sec = 20
+tool_timeout_sec = 120

@@ -10,6 +10,7 @@ pub mod pack;
 pub mod pipeline;
 pub mod scan;
 pub mod sniff;
+mod sibling_output;
 pub mod storage;
 pub mod types;
 

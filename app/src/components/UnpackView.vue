@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import StyledSelect from "./StyledSelect.vue";
+import TaskActivity from './TaskActivity.vue';
 import type { SelectOption } from "../types/select";
 import { useShellQueue, appendUniquePaths } from '../composables/useShellQueue';
 import { waitForToolPathsSave } from '../composables/useToolPaths';
@@ -14,7 +15,42 @@ import {
 } from "../types";
 
 const LEVELS = ["ok", "error", "warn", "skip", "info"] as const;
-const selectedPaths = useShellQueue().unpackPaths;
+const { unpackPaths: selectedPaths, directRequests, directActive } = useShellQueue();
+const shellReady = ref(false);
+let shellTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleShellRun() {
+  if (!shellReady.value || running.value || starting.value || !directRequests.value.length || shellTimer) return;
+  shellTimer = setTimeout(() => { shellTimer = undefined; void startShellRequest(); }, 300);
+}
+async function startShellRequest() {
+  if (!shellReady.value || running.value || starting.value) return;
+  const request = directRequests.value.shift();
+  if (!request) return;
+  starting.value = true;
+  running.value = true;
+  const previousSummary = summary.value;
+  const previousProgress = { done: done.value, total: total.value, current: current.value };
+  summary.value = null;
+  done.value = 0; total.value = 0; current.value = `正在准备右键解压：${request.paths.join('、')}`;
+  try {
+    await waitForToolPathsSave();
+    const accepted = await invoke<boolean>('start_shell_run', { action: request.action, paths: [...request.paths] });
+    if (!accepted) {
+      directRequests.value.unshift(request);
+      summary.value = previousSummary;
+      done.value = previousProgress.done; total.value = previousProgress.total; current.value = previousProgress.current;
+      running.value = false;
+    } else {
+      appendLog(`[右键解压] ${request.action === 'extract-here' ? '解压到当前目录' : '解压到同名文件夹'}，使用已保存的密码库及启用规则`, 'info');
+    }
+  } catch (error) {
+    running.value = false;
+    summary.value = previousSummary;
+    done.value = previousProgress.done; total.value = previousProgress.total; current.value = previousProgress.current;
+    appendLog(`[右键解压失败] ${error}`, 'error');
+    void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
+  } finally { starting.value = false; scheduleShellRun(); }
+}
 type SourceMode = 'selected' | 'directory' | 'both';
 const SOURCE_MODE_KEY = 'unpack_source_mode_v1';
 function initialSourceMode(): SourceMode {
@@ -307,11 +343,14 @@ async function start() {
 }
 
 async function stop() {
+  directRequests.value = [];
+  if (shellTimer) { clearTimeout(shellTimer); shellTimer = undefined; }
   await invoke("cancel_run");
   appendLog("[警告] 正在停止…", "warn");
 }
 
 function onDone(s: SummaryPayload) {
+  if (s.failed.length || s.warns.length) void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
   running.value = false;
   summary.value = s;
   appendLog(
@@ -380,6 +419,8 @@ function onRetryDone(payload: { slot: number; failedIndex: number; result: Summa
 }
 
 // ---------- 生命周期 ----------
+watch(() => directRequests.value.map(request => `${request.action}:${request.paths.length}`).join('|'), scheduleShellRun);
+watch(() => running.value || starting.value, (active) => { directActive.value = active; scheduleShellRun(); }, { flush: 'sync' });
 
 onMounted(async () => {
   try {
@@ -403,9 +444,13 @@ onMounted(async () => {
     await listen<SummaryPayload>("uz-done", (e) => onDone(e.payload)),
     await listen<{ slot: number; failedIndex: number; result: SummaryPayload }>("uz-retry-done", (e) => onRetryDone(e.payload)),
   );
+  shellReady.value = true;
+  scheduleShellRun();
 });
 
 onUnmounted(() => {
+  shellReady.value = false;
+  if (shellTimer) clearTimeout(shellTimer);
   for (const u of unlisteners) u();
   unlisteners = [];
 });
@@ -414,6 +459,8 @@ onUnmounted(() => {
 <template>
   <div class="page-content">
     <h1 class="title">自动解压</h1>
+    <TaskActivity :running="running" :current="current" :done="done" :total="total" kind="解压" />
+    <p v-if="directRequests.length" class="selection-hint" role="status">右键解压等待中（{{ directRequests.length }} 批），当前任务结束后自动开始，使用已保存的解压和密码设置。</p>
     <section class="glass-card section-card">
       <div class="section-title">解压来源</div>
       <div class="source-modes" role="radiogroup" aria-label="解压来源方式">

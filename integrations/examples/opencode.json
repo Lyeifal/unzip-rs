@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unzip_rs": {
+      "type": "local",
+      "command": ["C:/tools/unzip-rs-mcp/unzip-mcp.exe"],
+      "enabled": true
+    }
+  }
+}

@@ -44,6 +44,13 @@ jobs:
           Copy-Item assets/bundled/* app/src-tauri/resources/bundled -Recurse -Force
       - name: Test Backend
         run: cargo test --manifest-path app/src-tauri/Cargo.toml --locked
+      - name: Test CLI And MCP
+        run: cargo test --workspace --locked
+      - name: Build MCP Integration Bundle
+        shell: pwsh
+        run: ./integrations/build-bundle.ps1
+      - name: Verify MCP Stdio And Archive Round Trip
+        run: python integrations/tests/stdio_smoke.py --server target/release/unzip-mcp.exe
       - name: Build Signed Update
         working-directory: app
         env:
@@ -61,7 +68,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-update
-          path: app/src-tauri/target/release/update/*
+          path: |
+            app/src-tauri/target/release/update/*
+            target/integrations/unzip-rs-mcp_*_windows-x86_64.zip
       - name: Create Release Draft
         shell: pwsh
         env:
@@ -69,5 +78,6 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $assets = Get-ChildItem app/src-tauri/target/release/update -File | Select-Object -ExpandProperty FullName
+          $assets += Get-ChildItem target/integrations/unzip-rs-mcp_*_windows-x86_64.zip -File | Select-Object -ExpandProperty FullName
           gh release create $env:RELEASE_TAG @assets --draft --verify-tag --title "unzip-rs $env:RELEASE_TAG" --generate-notes
           if ($LASTEXITCODE -ne 0) { throw 'Release draft creation failed.' }

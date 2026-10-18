@@ -50,6 +50,9 @@ pub struct Config {
     pub recursive: bool,
     pub product_exts: Vec<String>,
     pub max_depth: u32,
+    pub quick_pack_format: String, // Explorer quick pack: 7z | zip
+    pub shell_show_progress: bool, // Show the application for direct Explorer tasks.
+    pub shell_show_console: bool, // Opt-in persistent terminal logs for direct tasks.
     #[serde(skip)]
     pub retry_password_only: bool,
 }
@@ -76,6 +79,9 @@ impl Default for Config {
                 ".aab".to_string(),
             ],
             max_depth: 5,
+            quick_pack_format: "7z".into(),
+            shell_show_progress: true,
+            shell_show_console: false,
             retry_password_only: false,
         }
     }

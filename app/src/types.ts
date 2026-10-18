@@ -21,6 +21,9 @@ export interface Config {
   recursive: boolean;
   product_exts: string[];
   max_depth: number;
+  quick_pack_format: string;
+  shell_show_progress: boolean;
+  shell_show_console: boolean;
 }
 
 // 后端 uz-done 事件载荷：ok/failed/skipped 为 [名称, 备注/原因] 二元组。
@@ -48,6 +51,9 @@ export function defaultConfig(): Config {
     recursive: true,
     product_exts: [".apk", ".xapk", ".apks", ".aab"],
     max_depth: 5,
+    quick_pack_format: '7z',
+    shell_show_progress: true,
+    shell_show_console: false,
   };
 }
 

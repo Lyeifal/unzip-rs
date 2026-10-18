@@ -1,0 +1,4 @@
+interface:
+  display_name: "unzip-rs"
+  short_description: "Scan, pack, extract and organize local archives"
+  default_prompt: "Use $unzip-rs to inspect and process my local archives."

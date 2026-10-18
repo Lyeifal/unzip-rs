@@ -1,0 +1,18 @@
+[package]
+name = "unzip-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local stdio MCP server for unzip-rs archive management"
+
+[dependencies]
+unzip-core = { path = "../unzip-core" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmcp = { version = "3.5.1", features = ["transport-io"] }
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true

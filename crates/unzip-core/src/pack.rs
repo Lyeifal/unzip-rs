@@ -39,7 +39,7 @@ const PW_LEN: usize = 16;
 #[serde(default)]
 pub struct PackOptions {
     pub format: String,           // "7z" | "zip"
-    pub password_mode: String,    // random_per_pack | random_uniform | manual
+    pub password_mode: String,    // random_per_pack | random_uniform | manual | none
     pub uniform_password: String, // manual 模式手填；random_uniform 模式留空
     pub volume_threshold_gb: f64, // 内容总大小超过才分卷
     pub volume_size_gb: f64,      // 每个分卷的大小
@@ -689,6 +689,44 @@ fn pack_one(
     })
 }
 
+/// Explorer quick action: one unencrypted archive beside each selected item.
+/// Use file stems (report.txt → report.7z) and full directory names.
+pub fn run_quick_pack(sources: &[PathBuf], format: &str, cfg: &Config, cb: &dyn RunCallback) -> PackSummary {
+    struct Progress<'a> { cb: &'a dyn RunCallback }
+    impl RunCallback for Progress<'_> {
+        fn on_log(&self, msg: &str, level: LogLevel) { self.cb.on_log(msg, level); }
+        fn on_progress(&self, _done: usize, _total: usize, _name: &str) {}
+        fn should_cancel(&self) -> bool { self.cb.should_cancel() }
+    }
+    let mut summary = PackSummary::default();
+    for (index, source) in sources.iter().enumerate() {
+        if cb.should_cancel() { summary.warns.push("用户取消，剩余包未处理".into()); break; }
+        let name = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let Some(parent) = source.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+            summary.failed.push((name, "无法确定源文件所在目录".into()));
+            cb.on_progress(index + 1, sources.len(), &source.to_string_lossy());
+            continue;
+        };
+        if !source.is_file() && !source.is_dir() {
+            summary.failed.push((name.clone(), "源文件或目录已不存在".into()));
+            cb.on_progress(index + 1, sources.len(), &name);
+            continue;
+        }
+        let archive_name = if source.is_file() { source.file_stem().unwrap_or_default().to_string_lossy().into_owned() } else { name.clone() };
+        let options = PackOptions {
+            format: format.into(), name_start: archive_name, name_mode: "legacy".into(),
+            password_mode: "none".into(), mix_txt: false, volume_threshold_gb: f64::MAX,
+            output_dir: parent.to_string_lossy().into_owned(), ..Default::default()
+        };
+        let progress = Progress { cb };
+        cb.on_progress(index, sources.len(), &name);
+        let result = run_pack(std::slice::from_ref(source), &options, cfg, &progress);
+        summary.ok.extend(result.ok); summary.failed.extend(result.failed); summary.warns.extend(result.warns);
+        cb.on_progress(index + 1, sources.len(), &name);
+    }
+    summary
+}
+
 /// 入口：逐源打包。命名从 name_start 起按 step 递增；密码按模式生成；
 /// 包间检查 should_cancel（与解压侧取消粒度对齐，不杀子进程）。
 pub fn run_pack(
@@ -793,6 +831,7 @@ pub fn run_pack(
         }
         let name = plan_at(&plan, i);
         let pw: Option<String> = match opts.password_mode.as_str() {
+            "none" => None,
             "manual" => {
                 let p = opts.uniform_password.trim().to_string();
                 if p.is_empty() {
@@ -1368,6 +1407,67 @@ mod tests {
         assert_eq!(plan_at(&plan, 1), "G201");
         let names = preview_pack_names(&o, 2).unwrap();
         assert_eq!(names, vec!["G200".to_string(), "G201".to_string()]);
+    }
+
+    #[test]
+    fn quick_pack_same_name_both_formats_preserve_sources_and_existing_archives() {
+        let seven_zip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/bundled/7z.exe");
+        if !seven_zip.is_file() { return; }
+        let (_guard, dir) = catalog_env();
+        let source = dir.path().join("中文 空格 & 原文件.txt");
+        let folder = dir.path().join("资料 文件夹.v1");
+        fs::write(&source, b"original text").unwrap();
+        fs::create_dir_all(folder.join("empty")).unwrap();
+        fs::write(folder.join("nested.txt"), b"nested content").unwrap();
+        let cfg = Config { seven_zip: seven_zip.to_string_lossy().into_owned(), ..Default::default() };
+        let cb = crate::types::NullCallback;
+        for format in ["7z", "zip"] {
+            let existing = dir.path().join(format!("中文 空格 & 原文件.{format}"));
+            fs::write(&existing, b"keep existing archive").unwrap();
+            let summary = run_quick_pack(&[source.clone(), folder.clone()], format, &cfg, &cb);
+            assert_eq!(summary.ok.len(), 2, "{:?}", summary.failed);
+            assert!(summary.failed.is_empty());
+            assert!(summary.ok.iter().all(|result| result.password.is_none() && result.outputs.len() == 1));
+            assert!(summary.ok[0].outputs[0].ends_with(format!("中文 空格 & 原文件 (2).{format}")));
+            assert!(summary.ok[1].outputs[0].ends_with(format!("资料 文件夹.v1.{format}")));
+            assert_eq!(fs::read(&existing).unwrap(), b"keep existing archive");
+            for (index, result) in summary.ok.iter().enumerate() {
+                let out = dir.path().join(format!("verify-{format}-{index}"));
+                let status = std::process::Command::new(&seven_zip).args(["x", "-y", "-p"])
+                    .arg(format!("-o{}", out.display())).arg(&result.outputs[0]).output().unwrap();
+                assert!(status.status.success());
+                assert!(!out.join(MIX_TXT_NAME).exists());
+                if index == 0 { assert_eq!(fs::read(out.join(source.file_name().unwrap())).unwrap(), b"original text"); }
+                else {
+                    assert_eq!(fs::read(out.join("资料 文件夹.v1/nested.txt")).unwrap(), b"nested content");
+                    assert!(out.join("资料 文件夹.v1/empty").is_dir());
+                }
+            }
+        }
+        assert_eq!(fs::read(&source).unwrap(), b"original text");
+        assert_eq!(fs::read(folder.join("nested.txt")).unwrap(), b"nested content");
+        let catalog = crate::archive_catalog::load().unwrap();
+        assert_eq!(catalog["mappings"].as_array().unwrap().len(), 4);
+        assert!(catalog["mappings"].as_array().unwrap().iter().all(|record| record["password"].is_null()));
+    }
+
+    #[test]
+    fn quick_pack_rejects_unsupported_format_and_honors_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("input.txt");
+        fs::write(&source, b"keep").unwrap();
+        let result = run_quick_pack(std::slice::from_ref(&source), "rar", &Config::default(), &crate::types::NullCallback);
+        assert_eq!(result.failed.len(), 1);
+        struct Cancel;
+        impl RunCallback for Cancel {
+            fn on_log(&self, _: &str, _: LogLevel) {}
+            fn should_cancel(&self) -> bool { true }
+        }
+        let result = run_quick_pack(&[source.clone()], "7z", &Config::default(), &Cancel);
+        assert!(result.ok.is_empty());
+        assert!(!result.warns.is_empty());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert_eq!(fs::read(source).unwrap(), b"keep");
     }
 
     #[test]

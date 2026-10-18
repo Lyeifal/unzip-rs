@@ -4,7 +4,7 @@ import "./styles/themes.css";
 import "./styles/glassmorphism.css";
 import "./styles/animations.css";
 
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "./composables/useTheme";
 import UnpackView from "./components/UnpackView.vue";
@@ -13,7 +13,7 @@ import LibraryView from "./components/LibraryView.vue";
 import ThemeSettings from "./components/ThemeSettings.vue";
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { useShellQueue, appendUniquePaths, type ShellRequest } from './composables/useShellQueue';
+import { useShellQueue, appendUniquePaths, enqueueDirectRequest, enqueueQuickPack, type ShellRequest } from './composables/useShellQueue';
 import { useAppUpdater } from './composables/useAppUpdater';
 
 // 当前标签页
@@ -24,15 +24,40 @@ const updater = useAppUpdater();
 let updateTimer: ReturnType<typeof setTimeout> | undefined;
 let unlistenShell: UnlistenFn | undefined;
 let shellDrain = Promise.resolve();
+let shellIdleTimer: ReturnType<typeof setTimeout> | undefined;
+let shellDraining = 0;
+function scheduleShellIdle() {
+  if (shellIdleTimer) clearTimeout(shellIdleTimer);
+  shellIdleTimer = undefined;
+  if (shellDraining || shellQueue.directActive.value || shellQueue.quickActive.value
+      || shellQueue.directRequests.value.length || shellQueue.quickPackRequests.value.length) return;
+  shellIdleTimer = setTimeout(() => { void invoke('finish_shell_requests', { reveal: false }).catch(() => {}); }, 600);
+}
+watch(() => [shellQueue.directActive.value, shellQueue.quickActive.value, shellQueue.directRequests.value.length, shellQueue.quickPackRequests.value.length], scheduleShellIdle);
 function drainShellRequests() {
+  shellDraining++;
+  if (shellIdleTimer) clearTimeout(shellIdleTimer);
   shellDrain = shellDrain.then(async () => {
     const requests = await invoke<ShellRequest[]>('take_shell_requests');
     for (const request of requests) {
+      if (request.action === 'pack-same-name') {
+        enqueueQuickPack(request.paths);
+        tab.value = 'pack';
+        continue;
+      }
+      if (request.action === 'extract-here' || request.action === 'extract-folder') {
+        enqueueDirectRequest({ action: request.action, paths: request.paths });
+        tab.value = 'unpack';
+        continue;
+      }
       const paths = request.action === 'pack' ? shellQueue.packPaths : shellQueue.unpackPaths;
       paths.value = appendUniquePaths(paths.value, request.paths);
-      tab.value = request.action;
+      tab.value = request.action === 'pack' ? 'pack' : 'unpack';
     }
-  }).catch(error => { windowActionError.value = `添加文件失败：${error}`; });
+  }).catch(error => {
+    windowActionError.value = `添加文件失败：${error}`;
+    void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
+  }).finally(() => { shellDraining--; scheduleShellIdle(); });
 }
 
 // 主题设置面板
@@ -84,6 +109,7 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   if (updateTimer) clearTimeout(updateTimer);
+  if (shellIdleTimer) clearTimeout(shellIdleTimer);
   unlistenResize?.();
   unlistenShell?.();
   window.removeEventListener("scroll", revealPageScrollbar);

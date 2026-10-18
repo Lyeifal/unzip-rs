@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "unzip_rs": {
+      "type": "stdio",
+      "command": "C:/tools/unzip-rs-mcp/unzip-mcp.exe",
+      "args": []
+    }
+  }
+}
