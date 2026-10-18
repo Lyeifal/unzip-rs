@@ -9,6 +9,7 @@ export default defineConfig({
   server: {
     port: 1520,
     strictPort: true,
+    watch: { ignored: ['**/src-tauri/**'] },
   },
   build: {
     target: "es2021",

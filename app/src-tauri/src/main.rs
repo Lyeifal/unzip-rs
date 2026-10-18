@@ -1,17 +1,21 @@
-//! 自动解压工具 — Tauri v2 外壳。
+//! unzip-rs — Tauri v2 外壳。
 //! 启动时解析 app_data_dir，设 UNZIP_CONFIG_PATH / UNZIP_BUNDLED_DIR。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod shell_integration;
+mod tool_settings;
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
-use unzip_core::config::{load_config_from, save_config_to, Config};
+use unzip_core::config::{load_config_from, Config};
 use unzip_core::pack::{run_pack, PackOptions, PackSummary};
-use unzip_core::types::{LogLevel, RunCallback, Summary};
+use unzip_core::types::{LogLevel, RetryableFailure, RunCallback, Summary};
 
 struct AppState {
     config_path: PathBuf,
@@ -19,6 +23,8 @@ struct AppState {
     busy: Arc<AtomicBool>,
     /// 取消标志：停止按钮置位，run 循环的 should_cancel 读取。
     cancel: Arc<AtomicBool>,
+    retryable: Arc<Mutex<Vec<Option<RetryableFailure>>>>,
+    update_pending: AtomicBool,
 }
 
 /// 线程结束时自动复位 busy，防 panic 后卡死「运行中」状态。
@@ -48,9 +54,10 @@ impl RunCallback for TauriCallback {
 
     fn on_progress(&self, done: usize, total: usize, name: &str) {
         let event = format!("{}-progress", self.event_prefix);
-        let _ = self
-            .app
-            .emit(&event, json!({ "done": done, "total": total, "name": name }));
+        let _ = self.app.emit(
+            &event,
+            json!({ "done": done, "total": total, "name": name }),
+        );
     }
 
     fn should_cancel(&self) -> bool {
@@ -60,14 +67,16 @@ impl RunCallback for TauriCallback {
 
 /// Summary → JSON：ok/failed/skipped 为 [名称, 备注/原因] 二元组数组。
 fn summary_payload(s: &Summary) -> Value {
-    let pairs = |v: &[(String, String)]| -> Vec<Value> {
-        v.iter().map(|(a, b)| json!([a, b])).collect()
-    };
+    let pairs =
+        |v: &[(String, String)]| -> Vec<Value> { v.iter().map(|(a, b)| json!([a, b])).collect() };
     json!({
         "ok": pairs(&s.ok),
         "failed": pairs(&s.failed),
         "skipped": pairs(&s.skipped),
         "warns": s.warns,
+        "retryable": s.retryable.iter().enumerate().map(|(slot, r)| json!({
+            "slot": slot, "failed_index": r.failed_index, "name": r.name,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -92,7 +101,39 @@ fn load_config(state: State<'_, AppState>) -> Config {
 
 #[tauri::command]
 fn save_config(state: State<'_, AppState>, cfg: Config) -> bool {
-    save_config_to(&cfg, &state.config_path)
+    tool_settings::save_unpack_config(&state.config_path, cfg)
+}
+
+#[tauri::command]
+fn save_tool_paths(
+    state: State<'_, AppState>,
+    paths: tool_settings::ToolPaths,
+) -> Result<tool_settings::ToolPaths, String> {
+    tool_settings::save_paths(&state.config_path, paths)
+}
+
+#[tauri::command]
+fn begin_update_install(state: State<'_, AppState>) -> Result<(), String> {
+    acquire_update_install(&state.busy, &state.update_pending)
+}
+
+fn acquire_update_install(busy: &AtomicBool, update_pending: &AtomicBool) -> Result<(), String> {
+    if busy.swap(true, Ordering::SeqCst) {
+        return Err("请先等待压缩或解压任务完成，再安装更新".into());
+    }
+    update_pending.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn end_update_install(state: State<'_, AppState>) {
+    release_update_install(&state.busy, &state.update_pending);
+}
+
+fn release_update_install(busy: &AtomicBool, update_pending: &AtomicBool) {
+    if update_pending.swap(false, Ordering::SeqCst) {
+        busy.store(false, Ordering::SeqCst);
+    }
 }
 
 #[tauri::command]
@@ -122,7 +163,11 @@ async fn pick_file(current: String) -> Option<String> {
             dlg = if p.is_dir() {
                 dlg.set_directory(p)
             } else {
-                dlg.set_file_name(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                dlg.set_file_name(
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
             };
         }
         dlg.pick_file().map(|p| p.to_string_lossy().into_owned())
@@ -186,13 +231,12 @@ fn start_run(
     source_dir: String,
     output_dir: String,
     failed_dir: String,
+    files: Option<Vec<String>>,
+    source_mode: Option<String>,
 ) -> Result<(), String> {
-    let src = PathBuf::from(source_dir.trim());
-    if source_dir.trim().is_empty() || !src.is_dir() {
-        return Err("请先选择有效的压缩包所在目录".to_string());
-    }
+    let sources = collect_unpack_sources(&source_dir, files, source_mode.as_deref())?;
     if output_dir.trim().is_empty() {
-        return Err("请先选择解压文件所在目录".to_string());
+        return Err("请先选择解压输出目录".to_string());
     }
     if state.busy.swap(true, Ordering::SeqCst) {
         return Err("已有解压任务正在进行中".to_string());
@@ -201,13 +245,20 @@ fn start_run(
     let cfg = load_config_from(&state.config_path);
     let out = PathBuf::from(output_dir.trim());
     let failed = if failed_dir.trim().is_empty() {
-        out.join("解压失败")
+        out.join("failed")
     } else {
         PathBuf::from(failed_dir.trim())
     };
 
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
+    let retryable = state.retryable.clone();
+    if let Ok(mut pending) = retryable.lock() {
+        pending.clear();
+    } else {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("重试状态不可用".into());
+    }
     cancel.store(false, Ordering::SeqCst);
     std::thread::spawn(move || {
         let _guard = BusyGuard(busy);
@@ -219,18 +270,118 @@ fn start_run(
             event_prefix: "uz",
         };
         let summary = unzip_core::run(
-            &[src],
+            &sources,
             &out,
-            Some(&failed),
+            cfg.failed_dir_enabled.then_some(failed.as_path()),
             cfg,
             passwords,
             &cb,
             false,
             recursive,
         );
+        if let Ok(mut pending) = retryable.lock() {
+            *pending = summary.retryable.iter().map(|r| Some(RetryableFailure {
+                name: r.name.clone(), paths: r.paths.clone(), failed_index: r.failed_index,
+            })).collect();
+        }
         let _ = app.emit("uz-done", summary_payload(&summary));
     });
     Ok(())
+}
+
+#[tauri::command]
+fn retry_unpack_password(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: usize,
+    password: String,
+    output_dir: String,
+) -> Result<(), String> {
+    if password.is_empty() { return Err("请输入新密码".into()); }
+    if output_dir.trim().is_empty() { return Err("请先选择解压输出目录".into()); }
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("已有解压任务正在进行中".into());
+    }
+    let target = match state.retryable.lock() {
+        Ok(pending) => pending.get(slot).and_then(|r| r.as_ref()).map(|r| (r.paths.clone(), r.failed_index)),
+        Err(_) => None,
+    };
+    let Some((paths, failed_index)) = target else {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("该任务已不可重试，请重新扫描".into());
+    };
+    if paths.is_empty() || paths.iter().any(|p| !p.is_file()) {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("失败压缩包已移动或删除，请重新扫描".into());
+    }
+    let mut cfg = load_config_from(&state.config_path);
+    cfg.retry_password_only = true;
+    cfg.hash_match = false;
+    cfg.passwords.clear();
+    cfg.password_rules.clear();
+    cfg.password_strategy = "list_order".into();
+    let busy = state.busy.clone();
+    let cancel = state.cancel.clone();
+    let pending = state.retryable.clone();
+    let out = PathBuf::from(output_dir.trim());
+    cancel.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _guard = BusyGuard(busy);
+        let cb = TauriCallback { app: app.clone(), cancel, event_prefix: "uz" };
+        let mut summary = unzip_core::run(&paths, &out, None, cfg, vec![password.clone()], &cb, false, false);
+        if let Ok(mut entries) = pending.lock() {
+            if let Some(entry) = entries.get_mut(slot) {
+                if !summary.ok.is_empty() || !summary.failed.is_empty() {
+                    *entry = summary.retryable.first().map(|r| RetryableFailure {
+                        name: r.name.clone(), paths: r.paths.clone(), failed_index,
+                    });
+                }
+            }
+        }
+        if !summary.ok.is_empty() {
+            let mut saved = load_config_from(&app.state::<AppState>().config_path);
+            if !saved.passwords.contains(&password) {
+                saved.passwords.push(password);
+                if !tool_settings::save_unpack_config(&app.state::<AppState>().config_path, saved) {
+                    summary.warns.push("重试成功，但新密码未能保存到密码库".into());
+                }
+            }
+        }
+        let _ = app.emit("uz-retry-done", json!({ "slot": slot, "failedIndex": failed_index, "result": summary_payload(&summary) }));
+    });
+    Ok(())
+}
+
+fn collect_unpack_sources(
+    source_dir: &str,
+    files: Option<Vec<String>>,
+    source_mode: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    // Missing mode preserves the old API: explicit files override directory scan.
+    let mode = source_mode.unwrap_or(if files.is_some() { "selected" } else { "directory" });
+    if !["selected", "directory", "both"].contains(&mode) {
+        return Err("解压来源方式无效".into());
+    }
+    let mut sources = Vec::new();
+    if mode == "directory" || mode == "both" {
+        let src = PathBuf::from(source_dir.trim());
+        if source_dir.trim().is_empty() || !src.is_dir() {
+            return Err("请先选择有效的压缩包所在目录".into());
+        }
+        sources.push(src);
+    }
+    if mode == "selected" || mode == "both" {
+        let files = files.ok_or("选中文件列表为空")?;
+        if files.is_empty() {
+            return Err("选中文件列表为空".into());
+        }
+        let paths: Vec<_> = files.into_iter().map(PathBuf::from).collect();
+        if paths.iter().any(|p| !p.is_file() && !p.is_dir()) {
+            return Err("选中的部分文件或目录已不存在，请更新列表".into());
+        }
+        sources.extend(paths);
+    }
+    Ok(sources)
 }
 
 #[tauri::command]
@@ -285,65 +436,217 @@ fn start_pack(
     Ok(())
 }
 
-/// 加载 pack_mapping.json 文件
 #[tauri::command]
-fn load_mapping_file(dir: String) -> Result<String, String> {
-    let json_path = PathBuf::from(dir).join("pack_mapping.json");
-    if !json_path.exists() {
-        return Err(format!("未找到 pack_mapping.json 文件"));
-    }
-    std::fs::read_to_string(&json_path)
-        .map_err(|e| format!("读取文件失败：{}", e))
+async fn preview_pack_names(options: PackOptions, count: usize) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        unzip_core::pack::preview_pack_names(&options, count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// 保存 pack_mapping.json 文件（先备份）
 #[tauri::command]
-fn save_mapping_file(dir: String, content: String) -> Result<(), String> {
-    let json_path = PathBuf::from(dir).join("pack_mapping.json");
+async fn load_archive_library() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        Ok(json!({"path": unzip_core::archive_catalog::database_path(), "catalog": unzip_core::archive_catalog::load()?}))
+    }).await.map_err(|e| e.to_string())?
+}
 
-    // 备份旧文件
-    if json_path.exists() {
-        let backup_path = json_path.with_extension("json.bak");
-        if let Err(e) = std::fs::copy(&json_path, &backup_path) {
-            eprintln!("备份文件失败：{}", e);
-        }
-    }
+#[tauri::command]
+async fn query_archive_library(
+    page: u32,
+    page_size: u32,
+    search: String,
+    sort: String,
+    filters: HashMap<String, String>,
+    option_fields: Vec<String>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(json!({
+            "path": unzip_core::archive_catalog::database_path(),
+            "result": unzip_core::archive_catalog::query_page(
+                page, page_size, &search, &sort, &filters, &option_fields
+            )?
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
-    // 写入新内容
-    std::fs::write(&json_path, content)
-        .map_err(|e| format!("写入文件失败：{}", e))
+#[tauri::command]
+async fn update_archive_metadata(record_id: String, metadata: Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        unzip_core::archive_catalog::update_metadata(&record_id, metadata)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn import_archive_library(path: Option<String>) -> Result<Option<usize>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = match path {
+            Some(path) => {
+                let file = PathBuf::from(path);
+                // Automatic migration only imports a known old output-directory mapping.
+                if !file.is_file() {
+                    return Ok(None);
+                }
+                file
+            }
+            None => match rfd::FileDialog::new()
+                .add_filter("压缩记录 JSON", &["json"])
+                .pick_file()
+            {
+                Some(file) => file,
+                None => return Ok(None),
+            },
+        };
+        unzip_core::archive_catalog::import_legacy(&file).map(Some)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_archive_library() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("压缩记录 JSON", &["json"])
+            .set_file_name("pack_mapping_backup.json")
+            .save_file()
+        else {
+            return Ok(None);
+        };
+        unzip_core::archive_catalog::export(&file)?;
+        Ok(Some(file.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .manage(shell_integration::ShellState::default())
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            shell_integration::enqueue(app, &args, Path::new(&cwd));
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
-            let app_data = app.path().app_data_dir().expect("无法解析 app_data_dir");
-            std::fs::create_dir_all(&app_data)?;
+            let app_data = app.path().app_data_dir()?;
+            let local_data = app.path().app_local_data_dir()?;
+            let legacy = unzip_core::storage::LEGACY_APP_DIR_NAME;
+            // Window creation is delayed until both migrations complete, before WebView opens its files.
+            unzip_core::storage::migrate_directory(&app.path().data_dir()?.join(legacy), &app_data, true)
+                .map_err(std::io::Error::other)?;
+            unzip_core::storage::migrate_directory(&app.path().local_data_dir()?.join(legacy), &local_data, false)
+                .map_err(std::io::Error::other)?;
             let config_path = app_data.join("config.json");
             std::env::set_var("UNZIP_CONFIG_PATH", &config_path);
+            std::env::set_var("UNZIP_CATALOG_PATH", app_data.join("pack_mapping.json"));
             if let Ok(res_dir) = app.path().resource_dir() {
-                std::env::set_var("UNZIP_BUNDLED_DIR", res_dir);
+                if let Some(bundled_dir) = tool_settings::find_bundled_tools_dir(&res_dir) {
+                    std::env::set_var("UNZIP_BUNDLED_DIR", &bundled_dir);
+                    if !tool_settings::initialize_bundled_tool_paths(&config_path, &bundled_dir) {
+                        eprintln!("无法保存内置工具默认路径；运行时仍会尝试内置工具");
+                    }
+                }
             }
             app.manage(AppState {
                 config_path,
                 busy: Arc::new(AtomicBool::new(false)),
                 cancel: Arc::new(AtomicBool::new(false)),
+                retryable: Arc::new(Mutex::new(Vec::new())),
+                update_pending: AtomicBool::new(false),
             });
+            shell_integration::enqueue(
+                app.handle(),
+                &std::env::args().collect::<Vec<_>>(),
+                &std::env::current_dir().unwrap_or_default(),
+            );
+            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?.build()?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
+            save_tool_paths,
+            begin_update_install,
+            end_update_install,
             pick_directory,
             pick_file,
             pick_files,
             pick_directories_multi,
             start_run,
+            retry_unpack_password,
             cancel_run,
             start_pack,
-            load_mapping_file,
-            save_mapping_file,
+            preview_pack_names,
+            load_archive_library,
+            query_archive_library,
+            update_archive_metadata,
+            import_archive_library,
+            export_archive_library,
+            shell_integration::get_shell_integration,
+            shell_integration::set_shell_integration,
+            shell_integration::take_shell_requests,
         ])
         .run(tauri::generate_context!())
-        .expect("运行自动解压工具失败");
+        .expect("运行 unzip-rs 失败");
+}
+
+#[cfg(test)]
+mod unpack_sources_tests {
+    use super::collect_unpack_sources;
+
+    #[test]
+    fn update_install_never_unlocks_an_active_archive_task() {
+        use super::{acquire_update_install, release_update_install, AtomicBool, Ordering};
+        let busy = AtomicBool::new(true);
+        let pending = AtomicBool::new(false);
+        assert!(acquire_update_install(&busy, &pending).is_err());
+        release_update_install(&busy, &pending);
+        assert!(busy.load(Ordering::SeqCst));
+        busy.store(false, Ordering::SeqCst);
+        assert!(acquire_update_install(&busy, &pending).is_ok());
+        assert!(busy.swap(true, Ordering::SeqCst), "更新期间不得开始压缩或解压任务");
+        release_update_install(&busy, &pending);
+        assert!(!busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn selected_directory_and_both_modes_choose_the_requested_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("one.zip");
+        std::fs::write(&selected, b"fixture").unwrap();
+        let directory = temp.path().to_string_lossy().into_owned();
+        let selected_text = selected.to_string_lossy().into_owned();
+
+        let chosen = collect_unpack_sources(&directory, Some(vec![selected_text.clone()]), Some("selected")).unwrap();
+        assert_eq!(chosen, vec![selected.clone()]);
+        let directory_only = collect_unpack_sources(&directory, Some(vec![selected_text.clone()]), Some("directory")).unwrap();
+        assert_eq!(directory_only, vec![temp.path().to_path_buf()]);
+        let both = collect_unpack_sources(&directory, Some(vec![selected_text.clone()]), Some("both")).unwrap();
+        assert_eq!(both, vec![temp.path().to_path_buf(), selected.clone()]);
+        // Old callers without a mode continue to let selected files override the directory.
+        assert_eq!(collect_unpack_sources(&directory, Some(vec![selected_text]), None).unwrap(), vec![selected]);
+    }
+
+    #[test]
+    fn source_modes_require_only_the_inputs_they_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("one.zip");
+        std::fs::write(&file, b"fixture").unwrap();
+        let selected = Some(vec![file.to_string_lossy().into_owned()]);
+        assert!(collect_unpack_sources("", selected.clone(), Some("selected")).is_ok());
+        assert!(collect_unpack_sources("", selected.clone(), Some("both")).is_err());
+        assert!(collect_unpack_sources(&temp.path().to_string_lossy(), None, Some("both")).is_err());
+        assert!(collect_unpack_sources(&temp.path().to_string_lossy(), selected, Some("unknown")).is_err());
+    }
 }

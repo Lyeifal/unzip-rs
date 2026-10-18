@@ -252,10 +252,49 @@ fn xz_flags_crc_ok(buf: &[u8], p: usize) -> bool {
 /// zip 本地头（防视频数据里巧合的 EOCD 字样误判成 zip）。
 /// （zip 偏移以 zip 起始为 0，公式天然兼容带前缀/SFX。注释最长 64KiB，
 /// 窗口 = 拖尾上限 + EOCD 头，注释超限的 EOCD 罩不住，属已知边界。）
+const ZIP64_RECORD_WINDOW: usize = 1024 * 1024;
+
+fn le_u32(buf: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(buf.get(offset..offset.checked_add(4)?)?.try_into().ok()?))
+}
+
+fn le_u64(buf: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(buf.get(offset..offset.checked_add(8)?)?.try_into().ok()?))
+}
+
+/// PKWARE APPNOTE 4.3.14/15: ZIP64's directory ends at its own EOCD,
+/// not at the later classic EOCD. A locator can be present even when the
+/// classic size/offset fields have NOT reached their 32-bit sentinel values.
+fn zip64_start_from_tail(buf: &[u8], eocd: usize, physical_start: u64) -> Option<u64> {
+    let locator = eocd.checked_sub(20)?;
+    if buf.get(locator..locator + 4)? != b"PK\x06\x07"
+        || le_u32(buf, locator + 4)? != 0 || le_u32(buf, locator + 16)? != 1 {
+        return None;
+    }
+    let relative_record = le_u64(buf, locator + 8)?;
+    let search_start = locator.saturating_sub(ZIP64_RECORD_WINDOW);
+    for candidate in magic_hits(&buf[search_start..locator], b"PK\x06\x06").into_iter().rev() {
+        let pos = search_start + candidate;
+        let Some(record_size) = le_u64(buf, pos + 4) else { continue };
+        if record_size < 44 || (pos as u64).checked_add(12).and_then(|v|v.checked_add(record_size)) != Some(locator as u64) {
+            continue;
+        }
+        if le_u32(buf, pos + 16)? != 0 || le_u32(buf, pos + 20)? != 0
+            || le_u64(buf, pos + 24)? != le_u64(buf, pos + 32)? {
+            continue;
+        }
+        let size = le_u64(buf, pos + 40)?;
+        let offset = le_u64(buf, pos + 48)?;
+        if offset.checked_add(size) != Some(relative_record) { continue; }
+        if let Some(start) = physical_start.checked_add(pos as u64).and_then(|v|v.checked_sub(relative_record)) { return Some(start); }
+    }
+    None
+}
+
 fn find_zip_eocd(path: &Path) -> Option<(u64, u64)> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(ZIP_TRAIL_LIMIT + 22);
+    let start = len.saturating_sub(ZIP_TRAIL_LIMIT + 22 + 65535 + ZIP64_RECORD_WINDOW as u64 + 20);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     file.take(len - start).read_to_end(&mut buf).ok()?;
@@ -284,7 +323,15 @@ fn find_zip_eocd(path: &Path) -> Option<(u64, u64)> {
         }
         let cd_size = u32::from_le_bytes([buf[i + 12], buf[i + 13], buf[i + 14], buf[i + 15]]) as u64;
         let cd_offset = u32::from_le_bytes([buf[i + 16], buf[i + 17], buf[i + 18], buf[i + 19]]) as u64;
-        let Some(zip_start) = eocd_pos.checked_sub(cd_offset).and_then(|v| v.checked_sub(cd_size)) else {
+        let has_zip64 = i >= 20 && &buf[i - 20..i - 16] == b"PK\x06\x07";
+        let zip_start = if has_zip64 {
+            zip64_start_from_tail(&buf, i, start)
+        } else if cd_size == u32::MAX as u64 || cd_offset == u32::MAX as u64 {
+            None // ZIP64 sentinel without a valid locator is not a classic EOCD.
+        } else {
+            eocd_pos.checked_sub(cd_offset).and_then(|v| v.checked_sub(cd_size))
+        };
+        let Some(zip_start) = zip_start else {
             continue;
         };
         let mut head_file = std::fs::File::open(path).ok()?;
@@ -332,7 +379,28 @@ fn read_lfh_at(f: &mut std::fs::File, off: u64) -> Option<(u16, u16, u64)> {
     if nlen == 0 || nlen > 512 {
         return None;
     }
-    let csize = u32::from_le_bytes([h[18], h[19], h[20], h[21]]) as u64;
+    let mut csize = le_u32(&h, 18)? as u64;
+    if csize == u32::MAX as u64 {
+        // APPNOTE 4.5.3: only sentinel-marked fields appear in the ZIP64 extra
+        // field, in uncompressed-size, compressed-size order.
+        f.seek(SeekFrom::Start(off.checked_add(30)?.checked_add(nlen as u64)?)).ok()?;
+        let mut extra = vec![0u8; elen as usize];
+        f.read_exact(&mut extra).ok()?;
+        let mut pos = 0usize;
+        let mut found = None;
+        while pos + 4 <= extra.len() {
+            let id = u16::from_le_bytes(extra[pos..pos + 2].try_into().ok()?);
+            let size = u16::from_le_bytes(extra[pos + 2..pos + 4].try_into().ok()?) as usize;
+            let data = extra.get(pos + 4..pos.checked_add(4)?.checked_add(size)?)?;
+            if id == 1 {
+                let compressed_offset = if le_u32(&h, 22)? == u32::MAX { 8 } else { 0 };
+                found = le_u64(data, compressed_offset);
+                break;
+            }
+            pos += 4 + size;
+        }
+        csize = found?;
+    }
     Some((nlen, elen, csize))
 }
 
@@ -355,7 +423,7 @@ fn follow_zip_chain(f: &mut std::fs::File, len: u64, seed: u64) -> bool {
         else {
             return false;
         };
-        if next + 4 > len {
+        if next.checked_add(4).is_none_or(|end|end > len) {
             return false;
         }
         let mut sig = [0u8; 4];
@@ -1012,6 +1080,123 @@ mod tests {
         zip.extend_from_slice(cd);
         zip.extend_from_slice(&eocd);
         zip
+    }
+
+    fn small_zip64(sentinels: bool) -> (Vec<u8>, Vec<u8>, usize) {
+        let payload = b"MZ game executable fixture, never execute".to_vec();
+        let name = b"Game.exe";
+        let mut extra = vec![1, 0, 16, 0];
+        extra.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        extra.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let mut local = vec![0u8; 30];
+        local[..4].copy_from_slice(b"PK\x03\x04");
+        local[4..6].copy_from_slice(&45u16.to_le_bytes());
+        local[14..18].copy_from_slice(&crc32_ieee(&payload).to_le_bytes());
+        local[18..26].fill(255);
+        local[26..28].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        local[28..30].copy_from_slice(&(extra.len() as u16).to_le_bytes());
+        local.extend_from_slice(name);
+        local.extend_from_slice(&extra);
+        local.extend_from_slice(&payload);
+        let cd_offset = local.len() as u64;
+        let mut cd = vec![0u8; 46];
+        cd[..4].copy_from_slice(b"PK\x01\x02");
+        cd[4..6].copy_from_slice(&45u16.to_le_bytes());
+        cd[6..8].copy_from_slice(&45u16.to_le_bytes());
+        cd[16..20].copy_from_slice(&crc32_ieee(&payload).to_le_bytes());
+        cd[20..28].fill(255);
+        cd[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        cd[30..32].copy_from_slice(&(extra.len() as u16).to_le_bytes());
+        cd.extend_from_slice(name);
+        cd.extend_from_slice(&extra);
+        let cd_size = cd.len() as u64;
+        local.extend_from_slice(&cd);
+        let record_offset = local.len() as u64;
+        let mut record = vec![0u8; 56];
+        record[..4].copy_from_slice(b"PK\x06\x06");
+        record[4..12].copy_from_slice(&44u64.to_le_bytes());
+        record[12..14].copy_from_slice(&45u16.to_le_bytes());
+        record[14..16].copy_from_slice(&45u16.to_le_bytes());
+        record[24..32].copy_from_slice(&1u64.to_le_bytes());
+        record[32..40].copy_from_slice(&1u64.to_le_bytes());
+        record[40..48].copy_from_slice(&cd_size.to_le_bytes());
+        record[48..56].copy_from_slice(&cd_offset.to_le_bytes());
+        local.extend_from_slice(&record);
+        local.extend_from_slice(b"PK\x06\x07\0\0\0\0");
+        local.extend_from_slice(&record_offset.to_le_bytes());
+        local.extend_from_slice(&1u32.to_le_bytes());
+        let eocd_offset = local.len();
+        local.extend_from_slice(b"PK\x05\x06\0\0\0\0\x01\0\x01\0");
+        local.extend_from_slice(&(if sentinels { u32::MAX } else { cd_size as u32 }).to_le_bytes());
+        local.extend_from_slice(&(if sentinels { u32::MAX } else { cd_offset as u32 }).to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        (local, payload, eocd_offset)
+    }
+
+    #[test]
+    fn embedded_zip64_with_trailer_and_optional_sentinels() {
+        let tmp = tempdir().unwrap();
+        for sentinels in [false, true] {
+            let mut prefix = bytes_from_hex("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
+            let expected = prefix.len() as u64;
+            let (zip, _, eocd) = small_zip64(sentinels);
+            prefix.extend_from_slice(&zip);
+            prefix.extend_from_slice(&[0u8; 200]);
+            let p = write_file(tmp.path(), if sentinels { "large.mp4" } else { "forced.mp4" }, &prefix);
+            assert_eq!(find_zip_eocd(&p), Some((expected, expected + eocd as u64)));
+            assert_eq!(sniff(&p), Some("zip"));
+            assert_eq!(embedded_offset(&p, "zip"), Some(expected));
+        }
+    }
+
+    #[test]
+    fn zip64_locator_checks_records_offsets_and_64_bit_values() {
+        let (mut zip, _, eocd) = small_zip64(true);
+        let record = eocd - 76;
+        let high_offset = 0x1_0000_0100u64;
+        let cd_size = le_u64(&zip, record + 40).unwrap();
+        zip[record + 48..record + 56].copy_from_slice(&high_offset.to_le_bytes());
+        zip[eocd - 12..eocd - 4].copy_from_slice(&(high_offset + cd_size).to_le_bytes());
+        let physical_start = high_offset + cd_size - record as u64 + 123;
+        assert_eq!(zip64_start_from_tail(&zip, eocd, physical_start), Some(123));
+        zip[eocd - 12] ^= 1; // inconsistent locator must not point into media
+        assert_eq!(zip64_start_from_tail(&zip, eocd, physical_start), None);
+        zip[record + 4..record + 12].fill(255);
+        assert_eq!(zip64_start_from_tail(&zip, eocd, physical_start), None);
+    }
+
+    #[test]
+    fn zip64_local_extra_supports_chain_recovery_and_rejects_truncation() {
+        let tmp = tempdir().unwrap();
+        let (mut zip, payload, _) = small_zip64(false);
+        let p = write_file(tmp.path(), "chain.bin", &zip);
+        let mut file = fs::File::open(&p).unwrap();
+        assert_eq!(read_lfh_at(&mut file, 0).unwrap().2, payload.len() as u64);
+        assert!(follow_zip_chain(&mut file, zip.len() as u64, 0));
+        zip[40..42].copy_from_slice(&8u16.to_le_bytes()); // bad extra block size, cannot read compressed size
+        let broken = write_file(tmp.path(), "truncated.bin", &zip);
+        assert_eq!(read_lfh_at(&mut fs::File::open(broken).unwrap(), 0), None);
+    }
+
+    #[test]
+    fn embedded_zip64_extracts_and_preserves_game_program() {
+        let sevenz = std::path::Path::new(r"C:\Program Files\7-Zip\7z.exe");
+        if !sevenz.is_file() { eprintln!("SKIP: missing 7z.exe"); return; }
+        let tmp = tempdir().unwrap();
+        let (zip, payload, _) = small_zip64(false);
+        let mut poly = bytes_from_hex("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
+        poly.extend_from_slice(&zip);
+        poly.extend_from_slice(&[0u8;64]);
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let input = write_file(&src, "game.mp4", &poly);
+        let out = tmp.path().join("out");
+        let cfg = crate::config::Config { password_strategy: "list_order".into(), hash_match: false, ..Default::default() };
+        let result = crate::pipeline::run(&[src], &out, Some(&tmp.path().join("failed")), cfg, vec![], &crate::types::NullCallback, false, true);
+        assert_eq!(result.ok.len(), 1, "{:?} {:?}", result.failed, result.skipped);
+        assert!(result.failed.is_empty());
+        assert_eq!(fs::read(out.join("game/Game.exe")).unwrap(), payload);
+        assert_eq!(fs::read(input).unwrap(), poly);
     }
 
     #[test]

@@ -157,6 +157,14 @@ pub struct Summary {
     pub failed: Vec<(String, String)>,   // (name, reason)
     pub skipped: Vec<(String, String)>,  // (name, reason)
     pub warns: Vec<String>,
+    pub retryable: Vec<RetryableFailure>,
+}
+
+#[derive(Debug)]
+pub struct RetryableFailure {
+    pub name: String,
+    pub paths: Vec<PathBuf>,
+    pub failed_index: usize,
 }
 
 /// 日志级别，as_str() 措辞固定（前端按此着色）。

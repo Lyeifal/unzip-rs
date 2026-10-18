@@ -3,18 +3,21 @@ export interface PasswordRule {
   suffix: string;
   keyword: string;
   passwords: string[];
+  enabled?: boolean; // 旧配置缺省时视为启用
 }
 
 export interface Config {
   source_dir: string;
   output_dir: string;
   failed_dir: string;
+  failed_dir_enabled: boolean;
   seven_zip: string;
   unrar: string;
   lz4: string;
   passwords: string[];
   password_rules: PasswordRule[];
   password_strategy: string; // list_order | recent_first
+  hash_match: boolean;
   recursive: boolean;
   product_exts: string[];
   max_depth: number;
@@ -26,6 +29,7 @@ export interface SummaryPayload {
   failed: [string, string][];
   skipped: [string, string][];
   warns: string[];
+  retryable: { slot: number; failed_index: number; name: string }[];
 }
 
 export function defaultConfig(): Config {
@@ -33,12 +37,14 @@ export function defaultConfig(): Config {
     source_dir: "",
     output_dir: "",
     failed_dir: "",
+    failed_dir_enabled: true,
     seven_zip: String.raw`C:\Program Files\7-Zip\7z.exe`,
     unrar: String.raw`C:\Program Files\WinRAR\UnRAR.exe`,
     lz4: "",
     passwords: [],
     password_rules: [],
     password_strategy: "recent_first",
+    hash_match: true,
     recursive: true,
     product_exts: [".apk", ".xapk", ".apks", ".aab"],
     max_depth: 5,
@@ -55,7 +61,7 @@ export function formatRule(rule: PasswordRule): string {
       ? `文件名或路径含「${keyword}」`
       : "全部压缩包";
   const pws = rule.passwords.length ? rule.passwords.join("、") : "（无密码）";
-  return `${cond}  →  优先尝试：${pws}`;
+  return `${rule.enabled === false ? '（已禁用）' : ''}${cond}  →  优先尝试：${pws}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,8 +74,14 @@ export interface PackOptions {
   uniform_password: string;
   volume_threshold_gb: number;
   volume_size_gb: number;
-  name_start: string;
   name_step: number;
+  name_mode: string; // 桌面端固定 parts；保留后端协议字段
+  name_prefix: string;
+  name_suffix: string;
+  prefix_enabled: boolean;
+  suffix_enabled: boolean;
+  number_start: string; // ASCII digits, width preserved
+  auto_number: boolean;
   mix_txt: boolean;
   txt_template: string; // 支持 {date} 占位符
   compression_level: number; // 0-9
@@ -82,6 +94,11 @@ export function defaultPackOptions(): PackOptions {
   if (saved) {
     try {
       const parsed = JSON.parse(saved);
+      const oldName = typeof parsed.name_start === 'string' ? parsed.name_start.trim() : 'G001';
+      const oldParts = /^(.*?)(\d+)$/.exec(oldName);
+      const legacy = parsed.name_mode === 'legacy' || (!parsed.name_mode && typeof parsed.name_start === 'string');
+      const migratedPrefix = oldParts?.[1] ?? oldName;
+      const migratedNumber = oldParts?.[2] ?? '001';
       // 合并默认值，确保新增字段有默认值
       return {
         format: parsed.format || "7z",
@@ -89,8 +106,14 @@ export function defaultPackOptions(): PackOptions {
         uniform_password: parsed.uniform_password || "",
         volume_threshold_gb: parsed.volume_threshold_gb ?? 3,
         volume_size_gb: parsed.volume_size_gb ?? 2,
-        name_start: parsed.name_start || "G001",
         name_step: parsed.name_step ?? 1,
+        name_mode: 'parts',
+        name_prefix: legacy ? migratedPrefix : (parsed.name_prefix ?? oldParts?.[1] ?? 'G'),
+        name_suffix: legacy ? '' : (parsed.name_suffix ?? ''),
+        prefix_enabled: legacy ? !!migratedPrefix : (parsed.prefix_enabled ?? !!oldParts?.[1]),
+        suffix_enabled: legacy ? false : (parsed.suffix_enabled ?? false),
+        number_start: legacy ? migratedNumber : (parsed.number_start ?? oldParts?.[2] ?? '001'),
+        auto_number: parsed.auto_number ?? true,
         mix_txt: parsed.mix_txt ?? true,
         txt_template: parsed.txt_template || "本资源于 {date} 打包整理，解压密码请查看发布页面。",
         compression_level: parsed.compression_level ?? 5,
@@ -107,8 +130,14 @@ export function defaultPackOptions(): PackOptions {
     uniform_password: "",
     volume_threshold_gb: 3,
     volume_size_gb: 2,
-    name_start: "G001",
     name_step: 1,
+    name_mode: 'parts',
+    name_prefix: 'G',
+    name_suffix: '',
+    prefix_enabled: true,
+    suffix_enabled: false,
+    number_start: '001',
+    auto_number: true,
     mix_txt: true,
     txt_template: "本资源于 {date} 打包整理，解压密码请查看发布页面。",
     compression_level: 5,
@@ -150,7 +179,7 @@ export function nextName(name: string, step: number): string {
 
 // 镜像 unzip_core::pack::sanitize_name：Windows 文件名非法字符与控制字符 → _。
 export function sanitizeName(name: string): string {
-  return name.replace(/[\/:*?"<>|]/g, "_").trim();
+  return name.replace(/[\/:*?"<>|\x00-\x1f]/g, "_").trim();
 }
 
 export function fmtSize(n: number): string {
@@ -162,7 +191,7 @@ export function fmtSize(n: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// 游戏库管理（扩展 pack_mapping.json）
+// 压缩包管理（AppData 集中 SQLite，兼容旧目录 JSON 映射）
 // ---------------------------------------------------------------------------
 
 export type EngineType =
@@ -175,14 +204,21 @@ export type EngineType =
   | "";  // 未标记
 
 export interface GameMetadata {
-  version: string;              // 版本号（如 v1.2.3）
-  engine: EngineType;           // 引擎类型
-  is_apk: boolean;              // 是否 APK 安装包
+  version?: string;             // 兼容旧版；显示内容迁移到备注
+  engine?: string;              // 兼容旧版引擎标记
+  is_apk?: boolean;             // 兼容旧版 APK 标记
   custom_tags?: string[];       // 自定义标签（可选）
   notes?: string;               // 备注（可选）
+  custom_fields?: Record<string, string | boolean>;
+  schema_version?: number;
+  [key: string]: unknown;
 }
 
 export interface GameMapping {
+  record_id?: string;
+  archive_path?: string;
+  output_dir?: string;
+  output_hashes?: { file_name: string; size_bytes: number; sha256: string }[];
   source_name: string;
   archive_name: string;
   password: string | null;
@@ -209,6 +245,20 @@ export interface PackMappingFile {
   generated_at: string;
   total_count: number;
   mappings: GameMapping[];
+}
+
+export interface ArchiveLibraryPage {
+  items: GameMapping[];
+  page: number;
+  page_size: number;
+  total: number;
+  stats: {
+    total: number;
+    source_bytes: number;
+    compressed_bytes: number;
+    avg_ratio: number;
+  };
+  filter_options: Record<string, string[]>;
 }
 
 // 引擎标签颜色映射

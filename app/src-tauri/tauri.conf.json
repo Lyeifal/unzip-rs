@@ -1,14 +1,22 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "自动解压工具",
-  "version": "0.1.0",
+  "productName": "unzip-rs",
+  "version": "0.1.26101801",
   "identifier": "com.unzip.app",
   "mainBinaryName": "unzip-app",
   "app": {
+    "appDirectoriesOverride": {
+      "config": "$CONFIG/unzip-rs",
+      "data": "$DATA/unzip-rs",
+      "localData": "$LOCALDATA/unzip-rs/webview",
+      "cache": "$CACHE/unzip-rs/cache",
+      "log": "$LOCALDATA/unzip-rs/logs"
+    },
     "windows": [
       {
         "label": "main",
-        "title": "自动解压工具",
+        "create": false,
+        "title": "unzip-rs",
         "width": 920,
         "height": 820,
         "minWidth": 760,
@@ -27,6 +35,14 @@
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3MzY5MzdERUIyQ0ZBMEEKUldRSytpenJmWk0ybDZ2ZjZWdXJMVlEvT0h4Vlp2L1N0RkkzcDVERTZWU212dW5KSS9tdVpHclcK",
+      "endpoints": ["https://github.com/Lyeifal/unzip-rs/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
@@ -40,6 +56,7 @@
     ],
     "windows": {
       "nsis": {
+        "installerHooks": "installer-hooks.nsh",
         "languages": ["SimpChinese", "English"],
         "installMode": "currentUser"
       }

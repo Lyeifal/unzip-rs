@@ -2,12 +2,33 @@
 import { ref, computed } from "vue";
 import { useTheme, type ManualThemeColors } from "../composables/useTheme";
 import { THEME_PRESETS, type ThemePresetId } from "../utils/themePresets";
+import LibraryFieldsSettings from './LibraryFieldsSettings.vue';
+import ShellIntegrationSettings from './ShellIntegrationSettings.vue';
+import ToolPathsSettings from './ToolPathsSettings.vue';
+import UpdateSettings from './UpdateSettings.vue';
 
 const emit = defineEmits<{
   close: [];
 }>();
 
 const theme = useTheme();
+const activeSection = ref('updates');
+const settingSections = [
+  { id: 'updates', label: '应用更新' },
+  { id: 'tools', label: '工具路径' },
+  { id: 'library', label: '压缩包管理' },
+  { id: 'shell', label: '系统集成' },
+  { id: 'presets', label: '主题预设' },
+  { id: 'wallpaper', label: '背景壁纸' },
+  { id: 'manual', label: '手动配色' },
+  { id: 'automatic', label: '自动配色' },
+  { id: 'appearance', label: '界面外观' },
+  { id: 'advanced', label: '高级选项' },
+];
+function goToSection(id: string) {
+  activeSection.value = id;
+  document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 // 文件上传
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -128,13 +149,21 @@ const paletteColors = computed(() => {
     <div class="settings-panel glass-card" @click.stop>
       <!-- 标题栏 -->
       <div class="panel-header">
-        <h2 class="panel-title">⚙️ 主题设置</h2>
+        <h2 class="panel-title">⚙️ 应用设置</h2>
         <button class="close-btn" @click="emit('close')">✕</button>
       </div>
 
+      <div class="settings-body">
+        <nav class="settings-sidebar" aria-label="设置导航">
+          <button v-for="item in settingSections" v-show="theme.config.value.enabled || (item.id !== 'automatic' && item.id !== 'advanced')" :key="item.id" type="button" class="sidebar-link" :class="{ active: activeSection === item.id }" @click="goToSection(item.id)">{{ item.label }}</button>
+        </nav>
       <div class="panel-content">
+        <div id="settings-updates" class="section"><UpdateSettings /></div>
+        <div id="settings-tools" class="section"><ToolPathsSettings /></div>
+        <div id="settings-library" class="section"><LibraryFieldsSettings /></div>
+        <div id="settings-shell" class="section"><ShellIntegrationSettings /></div>
         <!-- 主题预设 -->
-        <section class="section">
+        <section id="settings-presets" class="section">
           <h3 class="section-title">主题预设</h3>
           <p class="section-hint">配色预设可与壁纸和卡片透明度搭配使用。</p>
           <div class="preset-gallery">
@@ -162,7 +191,7 @@ const paletteColors = computed(() => {
         </section>
 
         <!-- 壁纸上传区域 -->
-        <section class="section">
+        <section id="settings-wallpaper" class="section">
           <h3 class="section-title">背景壁纸</h3>
 
           <!-- 当前壁纸预览 -->
@@ -218,7 +247,7 @@ const paletteColors = computed(() => {
           </div>
         </section>
 
-        <section class="section">
+        <section id="settings-manual" class="section">
           <h3 class="section-title">手动配色</h3>
           <p class="section-hint">可以直接选颜色，也可以吸取屏幕上预览图的颜色。</p>
           <p v-if="theme.config.value.themeMode !== 'manual'" class="section-hint mode-hint">
@@ -245,6 +274,7 @@ const paletteColors = computed(() => {
         <!-- 自动配色 -->
         <section
           v-if="theme.config.value.enabled"
+          id="settings-automatic"
           class="section"
         >
           <h3 class="section-title">自动配色</h3>
@@ -297,8 +327,13 @@ const paletteColors = computed(() => {
           </div>
         </section>
 
-        <section class="section appearance-section">
+        <section id="settings-appearance" class="section appearance-section">
           <h3 class="section-title">界面外观</h3>
+          <label class="checkbox-label">
+            <input type="checkbox" :checked="theme.config.value.titlebarBackground" @change="theme.updateTitlebarBackground(($event.target as HTMLInputElement).checked)" />
+            <span>显示标题栏底色</span>
+          </label>
+          <p class="section-hint titlebar-hint">为软件名称和窗口按钮所在栏添加主题底色；关闭时保持透明。</p>
           <div class="slider-control">
             <label class="slider-label">
               <span>卡片透明度</span>
@@ -320,6 +355,7 @@ const paletteColors = computed(() => {
         <!-- 高级选项 -->
         <section
           v-if="theme.config.value.enabled"
+          id="settings-advanced"
           class="section"
         >
           <h3 class="section-title">高级选项</h3>
@@ -371,6 +407,7 @@ const paletteColors = computed(() => {
           </div>
         </section>
       </div>
+      </div>
     </div>
   </div>
 </template>
@@ -390,11 +427,19 @@ const paletteColors = computed(() => {
 
 .settings-panel {
   width: 90%;
-  max-width: 600px;
+  max-width: 900px;
+  height: 90vh;
   max-height: 90vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   animation: scaleIn 0.3s ease;
 }
+.settings-body { display: grid; grid-template-columns: 170px minmax(0, 1fr); flex: 1; min-height: 0; }
+.settings-sidebar { display: flex; flex-direction: column; gap: 4px; padding: 16px 10px; border-right: 1px solid var(--border-subtle); overflow-y: auto; }
+.sidebar-link { width: 100%; padding: 10px 12px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; }
+.sidebar-link:hover, .sidebar-link.active { background: var(--surface-input); color: var(--text-primary); }
+.sidebar-link.active { box-shadow: inset 3px 0 var(--primary); }
 
 .panel-header {
   display: flex;
@@ -430,7 +475,10 @@ const paletteColors = computed(() => {
 
 .panel-content {
   padding: 24px;
+  min-height: 0;
+  overflow-y: auto;
 }
+.panel-content > .section { scroll-margin-top: 16px; }
 
 .section {
   margin-bottom: 32px;
@@ -445,6 +493,7 @@ const paletteColors = computed(() => {
   color: var(--text-tertiary);
   font-size: 12px;
 }
+.titlebar-hint { margin-top: 8px; }
 
 .manual-color-grid {
   display: grid;
@@ -812,6 +861,9 @@ const paletteColors = computed(() => {
 }
 
 @media (max-width: 520px) {
+  .settings-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .settings-sidebar { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border-subtle); }
+  .sidebar-link { width: auto; flex: 0 0 auto; white-space: nowrap; }
   .manual-color-grid {
     grid-template-columns: 1fr;
   }

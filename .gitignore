@@ -15,3 +15,7 @@
 # 编辑器/系统杂物
 .DS_Store
 Thumbs.db
+
+# Updater signing secrets belong outside the repository.
+*.key
+*.key.password

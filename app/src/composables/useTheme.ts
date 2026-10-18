@@ -32,6 +32,7 @@ export interface WallpaperConfig {
   palette?: ColorPalette; // 提取的配色
   manualColors: ManualThemeColors;
   cardOpacity: number;
+  titlebarBackground: boolean;
   blur: number;           // 模糊程度 (0-20px)
   darkness: number;       // 暗度 (0-1)
 }
@@ -65,6 +66,7 @@ function createDefaultConfig(): WallpaperConfig {
     presetId: DEFAULT_PRESET_ID,
     manualColors: { ...DEFAULT_MANUAL_COLORS },
     cardOpacity: 0.92,
+    titlebarBackground: false,
     blur: 0,
     darkness: 0.4,
   };
@@ -158,6 +160,7 @@ function normalizeSavedConfig(saved: Partial<WallpaperConfig>): WallpaperConfig 
     ...saved,
     manualColors: { ...DEFAULT_MANUAL_COLORS, ...saved.manualColors },
     cardOpacity: saved.cardOpacity ?? 0.92,
+    titlebarBackground: saved.titlebarBackground === true,
     blur: saved.blur ?? 0,
     darkness: saved.darkness ?? 0.4,
   };
@@ -419,6 +422,11 @@ export function useTheme() {
     saveConfig();
   }
 
+  function updateTitlebarBackground(enabled: boolean): void {
+    wallpaperConfig.value.titlebarBackground = enabled;
+    saveConfig();
+  }
+
   /**
    * 更新模糊度
    */
@@ -493,6 +501,7 @@ export function useTheme() {
     selectPreset,
     updateManualColor,
     updateCardOpacity,
+    updateTitlebarBackground,
     updateBlur,
     updateDarkness,
     init,

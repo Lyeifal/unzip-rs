@@ -12,7 +12,7 @@ use crate::config::{promote_password, Config};
 use crate::extract::Extractor;
 use crate::scan::{build_packages, scan_sources};
 use crate::sniff::{classify, parse_volume_name};
-use crate::types::{ArchiveKind, LogLevel, Package, PkgKind, RunCallback, ScanResult, Summary, VolFamily};
+use crate::types::{ArchiveKind, LogLevel, Package, PkgKind, RetryableFailure, RunCallback, ScanResult, Summary, VolFamily};
 
 fn file_name(p: &Path) -> String {
     p.file_name()
@@ -188,13 +188,16 @@ fn max_depth_of(cfg: &Config) -> u32 {
     }
 }
 
-/// 按密码规则生成该包的尝试顺序：匹配规则（按配置顺序）的优先密码在前，
-/// 全局密码库剩余项在后（去重保序）。
+/// 按密码规则生成该包的尝试顺序：启用且匹配的规则（按配置顺序）的优先密码在前，
+/// 全局密码库剩余项在后（去重保序）。禁用的规则完全忽略。
 pub fn order_passwords(pkg: &Package, cfg: &Config) -> Vec<String> {
     let mut ordered: Vec<String> = Vec::new();
     let name_l = file_name(&pkg.first).to_lowercase();
     let path_l = pkg.first.to_string_lossy().to_lowercase();
     for rule in &cfg.password_rules {
+        if !rule.enabled {
+            continue;
+        }
         let sfx = rule.suffix.trim().to_lowercase();
         let kw = rule.keyword.trim().to_lowercase();
         let mut hit = true;
@@ -223,6 +226,7 @@ pub fn order_passwords(pkg: &Package, cfg: &Config) -> Vec<String> {
 /// 包上下文：run 的 passwords 参数、输出/失败目录、回调。
 struct Ctx<'a> {
     passwords: &'a [String],
+    mapped_passwords: &'a [String],
     out_root: PathBuf,
     failed_root: Option<PathBuf>,
     cb: &'a dyn RunCallback,
@@ -584,23 +588,36 @@ fn lz4_pipeline(
 }
 
 /// 失败包（首卷 + 全部分卷）移入失败目录，重名递增；跨盘 rename 失败回退 copy+remove。
-fn move_to_failed(pkg: &Package, ctx: &Ctx, summary: &mut Summary) {
-    let Some(failed_root) = &ctx.failed_root else {
-        return;
-    };
-    if fs::create_dir_all(failed_root).is_err() {
-        return;
-    }
+fn move_to_failed(pkg: &Package, ctx: &Ctx, summary: &mut Summary) -> Vec<PathBuf> {
     let mut files = vec![pkg.first.clone()];
     files.extend(pkg.volumes.values().cloned());
+    let Some(failed_root) = &ctx.failed_root else {
+        return files;
+    };
+    if fs::create_dir_all(failed_root).is_err() {
+        return files;
+    }
+    // 旧失败包同名时整组另放一个目录，保留 .001/.002 等分卷原名以供重试。
+    let destination = if files.iter().any(|f| failed_root.join(file_name(f)).exists()) {
+        let group_dir = unique_dir(&failed_root.join(&pkg.name));
+        if fs::create_dir_all(&group_dir).is_err() { return files; }
+        group_dir
+    } else {
+        failed_root.clone()
+    };
+    let mut locations = Vec::new();
     for f in files {
-        let target = unique_target(failed_root, &f);
+        let target = unique_target(&destination, &f);
         if let Err(e) = move_file(&f, &target) {
             summary
                 .warns
                 .push(format!("移入失败目录失败 {}：{e}", file_name(&f)));
+            locations.push(f);
+        } else {
+            locations.push(target);
         }
     }
+    locations
 }
 
 /// 处理单个包：产物落位 / lz4 链 / 组装分卷 → 解压 → 解包 → 密码置顶。返回是否成功。
@@ -703,7 +720,12 @@ fn extract_package(
         let mut pw: Option<String> = None;
         // 本包完整密码序列：规则+库，并合并运行时密码（CLI --password 追加）。
         // lz4 链、正式解压、内层解包共用同一份，层间行为一致（内层不再缺密码）。
-        let mut pw_list = order_passwords(pkg, cfg);
+        let mut pw_list = if cfg.retry_password_only { Vec::new() } else { ctx.mapped_passwords.to_vec() };
+        if !cfg.retry_password_only {
+            for password in order_passwords(pkg, cfg) {
+                if !pw_list.contains(&password) { pw_list.push(password); }
+            }
+        }
         for p in ctx.passwords {
             if !pw_list.contains(p) {
                 pw_list.push(p.clone());
@@ -771,12 +793,16 @@ fn extract_package(
         // tmp_dirs 在函数出口统一 drop 清理（含失败路径）
         if let Some(err) = err {
             let _ = fs::remove_dir_all(&dest);
-            move_to_failed(pkg, ctx, summary);
+            let retry_paths = move_to_failed(pkg, ctx, summary);
+            if err.starts_with("密码不匹配：") && retry_paths.iter().all(|p| p.is_file()) {
+                summary.retryable.push(RetryableFailure { name: pkg.name.clone(), paths: retry_paths, failed_index: summary.failed.len() });
+            }
             summary.failed.push((pkg.name.clone(), err.clone()));
             ctx.cb.on_log(
                 &format!(
-                    "[失败] {}  —  {err}（源文件已移入失败目录）",
-                    file_name(&pkg.first)
+                    "[失败] {}  —  {err}（{}）",
+                    file_name(&pkg.first),
+                    if ctx.failed_root.is_some() { "源文件已移入失败目录" } else { "源文件保留原位" }
                 ),
                 LogLevel::Error,
             );
@@ -858,6 +884,7 @@ pub fn run(
     dry_run: bool,
     recursive: bool,
 ) -> Summary {
+    let failed_root = failed_root.filter(|_| cfg.failed_dir_enabled);
     let _ = fs::create_dir_all(out_root);
     let ex = Extractor::new(&cfg, None);
     let mut summary = Summary::default();
@@ -870,6 +897,8 @@ pub fn run(
         );
     }
     let mut pkgs = build_packages(&mut scan, source_roots);
+    let mut hash_passwords = crate::archive_catalog::HashPasswords::load(
+        cfg.hash_match && !cfg.retry_password_only && !dry_run && pkgs.iter().any(|p| p.kind != PkgKind::Product), cb);
 
     // 预组装：卷族包先归集/领养孤儿（其结果决定分组存活计数与目标目录）。
     // 去重跳过的卷族不做预组装：白白烧组装子进程，还会把改名孤儿领养进 scan.adopted
@@ -896,7 +925,11 @@ pub fn run(
                 continue;
             };
             let tpath = tmp.path().to_path_buf();
-            let pw_list = order_passwords(pkg, &cfg);
+            let mut pw_list = hash_passwords.passwords_for(&pkg.first, cb);
+            for password in (if cfg.retry_password_only { Vec::new() } else { order_passwords(pkg, &cfg) }).into_iter().chain(passwords.iter().cloned()) {
+                if !pw_list.contains(&password) { pw_list.push(password); }
+            }
+            if cb.should_cancel() { break; }
             let (first, err) = assemble_volumes(&ex, pkg, &mut scan, &pw_list, &tpath, cb);
             pre.insert(i, (first, Some(tmp), err));
         }
@@ -955,8 +988,17 @@ pub fn run(
                 LogLevel::Info,
             );
         }
+        let mapped_passwords = if !cfg.retry_password_only && !dry_run && pkgs[i].kind != PkgKind::Product {
+            hash_passwords.passwords_for(&pkgs[i].first, cb)
+        } else { Vec::new() };
+        if cb.should_cancel() {
+            summary.warns.push("用户取消".to_string());
+            cb.on_log("[警告] 已取消", LogLevel::Warn);
+            break;
+        }
         let ctx = Ctx {
             passwords: &passwords,
+            mapped_passwords: &mapped_passwords,
             out_root: out_root.to_path_buf(),
             failed_root: failed_root.map(|p| p.to_path_buf()),
             cb,
@@ -1049,6 +1091,7 @@ mod tests {
 
     fn tool_cfg(passwords: &[&str]) -> Config {
         Config {
+            hash_match: false, // Integration fixtures must not read the user's AppData catalog.
             seven_zip: SEVENZ.to_string(),
             unrar: UNRAR.to_string(),
             lz4: LZ4.to_string(),
@@ -1132,11 +1175,13 @@ mod tests {
                 suffix: ".lz4".into(),
                 keyword: String::new(),
                 passwords: vec!["bbb".into(), "zzz".into()],
+                ..Default::default()
             },
             PasswordRule {
                 suffix: String::new(),
                 keyword: "game".into(),
                 passwords: vec!["ccc".into()],
+                ..Default::default()
             },
         ];
         let mk_pkg = |name: &str| {
@@ -1163,6 +1208,67 @@ mod tests {
         );
         // 都不命中：纯密码库
         assert_eq!(order_passwords(&mk_pkg("x.7z"), &cfg), ["aaa", "bbb", "ccc"]);
+    }
+
+    /// 禁用的规则完全忽略：命中也跳过；启用规则保持配置顺序，库项兜底去重。
+    #[test]
+    fn order_passwords_skips_disabled_rules() {
+        let tmp = tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.passwords = vec!["aaa".into(), "bbb".into(), "ccc".into(), "zzz".into()];
+        cfg.password_rules = vec![
+            // 禁用的 .lz4 规则：会命中 GAME.LZ4，但其密码不得出现
+            PasswordRule {
+                suffix: ".lz4".into(),
+                keyword: String::new(),
+                passwords: vec!["bbb".into(), "zzz".into()],
+                enabled: false,
+                ..Default::default()
+            },
+            // 启用规则 1：.zip 命中
+            PasswordRule {
+                suffix: ".zip".into(),
+                keyword: String::new(),
+                passwords: vec!["ccc".into()],
+                enabled: true,
+                ..Default::default()
+            },
+            // 启用规则 2：缺省 enabled（旧字面量构造）= 启用；禁用的中间规则不得改变其相对库项的位置
+            PasswordRule {
+                suffix: String::new(),
+                keyword: String::new(),
+                passwords: vec!["aaa".into(), "zzz".into()],
+                ..Default::default()
+            },
+            // 禁用的全匹配规则同样忽略
+            PasswordRule {
+                suffix: String::new(),
+                keyword: String::new(),
+                passwords: vec!["disabled-pw".into()],
+                enabled: false,
+                ..Default::default()
+            },
+        ];
+        let first = tmp.path().join("GAME.LZ4");
+        fs::write(&first, b"").unwrap();
+        let pkg = Package {
+            name: "GAME.LZ4".to_string(),
+            first,
+            kind: PkgKind::Archive(ArchiveKind::Zip),
+            rel: PathBuf::from("GAME.LZ4"),
+            root: tmp.path().to_path_buf(),
+            vol_family: None,
+            vol_stem: String::new(),
+            volumes: BTreeMap::new(),
+            dest_base: None,
+        };
+        // 启用规则按配置顺序前置（.zip 不命中此包，落到全匹配启用规则），
+        // 禁用规则的密码一个都不出现，库剩余项保序兜底。
+        assert_eq!(
+            order_passwords(&pkg, &cfg),
+            ["aaa", "zzz", "bbb", "ccc"],
+            "禁用规则须完全跳过，启用规则顺序与库兜底须保持"
+        );
     }
 
     // ---------- 集成测试（真实外部工具，全部只写 tempfile 目录） ----------
@@ -1914,6 +2020,8 @@ mod tests {
             .arg("big.bin")
             .current_dir(work.path()));
 
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("e.7z.001"), b"older failure").unwrap();
         let cb = Collect::new();
         let summary = run(
             &[src.clone()],
@@ -1927,6 +2035,7 @@ mod tests {
         );
         assert_eq!(summary.ok.len(), 0);
         assert_eq!(summary.failed.len(), 1, "日志：{:?}", cb.all());
+        assert_eq!(summary.retryable.len(), 1, "加密分卷应可用新密码重试：{:?}", summary.failed);
         let reason = &summary.failed[0].1;
         assert!(
             reason.contains("密码"),
@@ -1936,6 +2045,48 @@ mod tests {
             !reason.contains("分卷组装后校验未通过"),
             "加密卷被误报为缺卷/损坏：{reason}"
         );
+        let retry_paths = summary.retryable[0].paths.clone();
+        assert_eq!(retry_paths.len(), 4);
+        assert!(retry_paths.iter().all(|p| p.parent() != Some(failed.as_path())));
+        assert_eq!(fs::read(failed.join("e.7z.001")).unwrap(), b"older failure");
+        let mut retry_cfg = tool_cfg(&["nope1", "nope2"]);
+        retry_cfg.retry_password_only = true;
+        let retried = run(&retry_paths, &out, None, retry_cfg, vec!["123456".into()], &cb, false, false);
+        assert!(retried.failed.is_empty(), "分卷重试失败：{:?}", retried.failed);
+        assert_eq!(out.join("e/big.bin").metadata().unwrap().len(), 200 * 1024);
+    }
+
+    #[test]
+    fn password_retry_keeps_failed_source_and_uses_only_new_password() {
+        if !have_tools(&[SEVENZ]) { return; }
+        let tmp = tempdir().unwrap();
+        let (src, out, failed) = three_dirs(&tmp);
+        fs::write(src.join("secret.txt"), b"retry content").unwrap();
+        sh(Command::new(SEVENZ)
+            .args(["a", "-t7z", "-pnew-secret", "-mhe=on"])
+            .arg(src.join("secret.7z"))
+            .arg("secret.txt")
+            .current_dir(&src));
+        fs::remove_file(src.join("secret.txt")).unwrap();
+        let archive = src.join("secret.7z");
+        let cb = Collect::new();
+        let mut initial_cfg = tool_cfg(&["old"]);
+        initial_cfg.failed_dir_enabled = false;
+        initial_cfg.failed_dir = failed.to_string_lossy().into_owned();
+        let first = run(&[archive.clone()], &out, Some(&failed), initial_cfg, vec![], &cb, false, false);
+        assert_eq!(first.retryable.len(), 1, "failed={:?}", first.failed);
+        assert_eq!(first.retryable[0].paths, vec![archive.clone()]);
+        assert!(archive.is_file(), "失败目录关闭时源文件不得移动");
+        assert!(!failed.exists(), "已指定失败路径但停用时，不应创建失败目录");
+
+        let mut retry_cfg = tool_cfg(&["new-secret"]);
+        retry_cfg.retry_password_only = true;
+        let wrong = run(&[archive.clone()], &out, None, retry_cfg.clone(), vec!["still-wrong".into()], &cb, false, false);
+        assert!(wrong.ok.is_empty(), "密码库中的正确密码不应参与重试");
+        assert!(archive.is_file());
+        let success = run(&[archive.clone()], &out, None, retry_cfg, vec!["new-secret".into()], &cb, false, false);
+        assert_eq!(success.ok.len(), 1, "failed={:?}", success.failed);
+        assert!(out.join("secret/secret.txt").exists());
     }
 
     /// apk 产物只落位、不解压。
@@ -2032,11 +2183,13 @@ mod tests {
         .unwrap();
 
         let cb = Collect::new();
+        let mut cfg = tool_cfg(&[]);
+        cfg.lz4.clear(); // 仅使用内置 Rust 解码器。
         run(
             &[src.clone()],
             &out,
             Some(&failed),
-            tool_cfg(&[]),
+            cfg,
             vec![],
             &cb,
             false,
@@ -2068,11 +2221,13 @@ mod tests {
         fs::copy(work.path().join("raw.bin.lz4"), src.join("game.mp4")).unwrap();
 
         let cb = Collect::new();
+        let mut cfg = tool_cfg(&[]);
+        cfg.lz4.clear(); // legacy 帧也必须无需外部 lz4.exe。
         run(
             &[src.clone()],
             &out,
             Some(&failed),
-            tool_cfg(&[]),
+            cfg,
             vec![],
             &cb,
             false,

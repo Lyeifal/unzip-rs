@@ -1,157 +1,75 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
-import { ENGINE_COLORS, type GameMapping, type GameMetadata } from "../types";
-import StyledSelect from "./StyledSelect.vue";
-import type { SelectOption } from "../types/select";
-
-const props = defineProps<{
-  mapping: GameMapping;
-}>();
-
-const engineOptions: SelectOption[] = [
-  { value: "", label: "未标记" },
-  { value: "Unity", label: "Unity" },
-  { value: "Unreal", label: "Unreal" },
-  { value: "RPG Maker", label: "RPG Maker" },
-  { value: "Godot", label: "Godot" },
-  { value: "自研", label: "自研" },
-  { value: "其他", label: "其他" },
-];
-
-const emit = defineEmits<{
-  "update:metadata": [metadata: GameMetadata];
-}>();
-
-// 初始化 metadata（兼容旧数据）
-const metadata = reactive<GameMetadata>({
-  version: props.mapping.metadata?.version || "",
-  engine: props.mapping.metadata?.engine || "",
-  is_apk: props.mapping.metadata?.is_apk || false,
-  custom_tags: props.mapping.metadata?.custom_tags || [],
-  notes: props.mapping.metadata?.notes || "",
-});
-
-// 编辑状态
-const editingVersion = ref(false);
-const versionInput = ref(metadata.version);
-
-// 防抖保存
-let saveTimer: number | null = null;
-function saveMetadata() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    emit("update:metadata", { ...metadata });
-  }, 500) as unknown as number;
+import { computed } from 'vue';
+import { type GameMapping, type GameMetadata } from '../types';
+import { useLibraryFields, type LibraryField } from '../composables/useLibraryFields';
+import StyledSelect from './StyledSelect.vue';
+const props = defineProps<{ mapping: GameMapping; disabled?: boolean }>();
+const emit = defineEmits<{ 'update:metadata': [metadata: GameMetadata] }>();
+const library = useLibraryFields();
+const metadata = computed(() => props.mapping.metadata ?? {});
+function saveNotes(event: Event) {
+  emit('update:metadata', { ...metadata.value, notes: (event.target as HTMLTextAreaElement).value });
 }
-
-// 版本号编辑
-function startEditVersion() {
-  editingVersion.value = true;
-  versionInput.value = metadata.version;
-  setTimeout(() => {
-    const input = document.querySelector(".version-input") as HTMLInputElement;
-    input?.focus();
-  }, 50);
+function setValue(id: string, value: string | number | boolean) {
+  emit('update:metadata', { ...metadata.value, custom_fields: { ...metadata.value.custom_fields, [id]: typeof value === 'boolean' ? value : String(value) } });
 }
-
-function saveVersion() {
-  metadata.version = versionInput.value.trim();
-  editingVersion.value = false;
-  saveMetadata();
+function valueOf(id: string): string { return String(metadata.value.custom_fields?.[id] ?? ''); }
+function optionsFor(field: LibraryField) {
+  const current = valueOf(field.id);
+  return [{ value: '', label: '未设置' }, ...[...new Set([...field.options, ...(current ? [current] : [])])].map(value => ({ value, label: value }))];
 }
-
-function cancelVersion() {
-  editingVersion.value = false;
-  versionInput.value = metadata.version;
-}
-
-// 引擎选择变更
-function handleEngineChange() {
-  saveMetadata();
-}
-
-// APK 复选框变更
-function handleApkChange() {
-  saveMetadata();
-}
-
-// 压缩率颜色
 const ratioClass = computed(() => {
   const ratio = parseFloat(props.mapping.compression_ratio);
-  if (ratio <= 60) return "ratio-good";
-  if (ratio <= 80) return "ratio-ok";
-  return "ratio-poor";
+  return ratio <= 60 ? 'ratio-good' : ratio <= 80 ? 'ratio-ok' : 'ratio-poor';
 });
-
 const ratioColor = computed(() => {
   const ratio = parseFloat(props.mapping.compression_ratio);
-  if (ratio <= 60) return "var(--success)";
-  if (ratio <= 80) return "var(--warning)";
-  return "var(--error)";
-});
-
-// 引擎标签颜色
-const engineColor = computed(() => {
-  return ENGINE_COLORS[metadata.engine] || ENGINE_COLORS[""];
+  return ratio <= 60 ? 'var(--success)' : ratio <= 80 ? 'var(--warning)' : 'var(--error)';
 });
 </script>
 
 <template>
   <div class="game-card glass-card card-enter">
     <!-- 图标区 -->
-    <div class="card-icon">🎮</div>
+    <div class="card-icon">📦</div>
 
     <!-- 标题区 -->
     <div class="card-title" :title="mapping.source_name">
       {{ mapping.source_name }}
     </div>
     <div class="card-archive">{{ mapping.archive_name }}</div>
-
-    <!-- 元数据编辑区 -->
-    <div class="card-meta">
-      <!-- 版本号 -->
-      <div class="meta-field">
-        <span class="field-label">版本</span>
-        <div v-if="!editingVersion" class="version-display" @click="startEditVersion">
-          <span v-if="metadata.version" class="version-text">{{ metadata.version }}</span>
-          <span v-else class="version-placeholder">点击输入</span>
-        </div>
-        <div v-else class="version-edit">
-          <input
-            v-model="versionInput"
-            type="text"
-            class="version-input input-glass"
-            placeholder="如 v1.2.3"
-            @keyup.enter="saveVersion"
-            @keyup.esc="cancelVersion"
-            @blur="saveVersion"
-          />
-        </div>
+    <div v-if="mapping.output_dir" class="card-archive" :title="mapping.output_dir">{{ mapping.output_dir }}</div>
+    <details v-if="mapping.output_hashes?.length" class="hash-details">
+      <summary>SHA-256 · {{ mapping.output_hashes.length }} 个文件</summary>
+      <div v-for="hash in mapping.output_hashes" :key="hash.file_name" class="hash-entry">
+        <span>{{ hash.file_name }}</span>
+        <code>{{ hash.sha256 }}</code>
       </div>
-
-      <!-- 引擎选择 -->
-      <div class="meta-field">
-        <span class="field-label">引擎</span>
-        <StyledSelect
-          v-model="metadata.engine"
-          class="engine-select select-glass"
-          :options="engineOptions"
-          aria-label="游戏引擎"
-          :style="{ borderColor: engineColor, color: engineColor }"
-          @update:model-value="handleEngineChange"
-        />
-      </div>
-
-      <!-- APK 复选框 -->
-      <label class="meta-field checkbox-field">
-        <input
-          v-model="metadata.is_apk"
-          type="checkbox"
-          @change="handleApkChange"
-        />
-        <span class="checkbox-label">📱 APK 安装包</span>
-      </label>
+    </details>
+    <div class="password-row">
+      <span class="field-label">解压密码</span>
+      <span v-if="!mapping.password" class="password-value">无密码</span>
+      <span v-else-if="library.showPasswords.value" class="password-value">{{ mapping.password }}</span>
+      <span v-else class="password-value" aria-label="密码已隐藏">••••••••</span>
     </div>
+
+    <fieldset class="card-meta metadata-editor" :disabled="disabled">
+      <label class="meta-field notes-field">
+        <span class="field-label">备注</span>
+        <textarea class="input-glass notes-input" :value="metadata.notes ?? ''" rows="2" placeholder="添加备注…" :aria-label="mapping.source_name + '备注'" @change="saveNotes" />
+      </label>
+      <div v-for="field in library.fields.value" :key="field.id" class="meta-field">
+        <label v-if="field.type === 'checkbox'" class="checkbox-field">
+          <input type="checkbox" :checked="metadata.custom_fields?.[field.id] === true" @change="setValue(field.id, ($event.target as HTMLInputElement).checked)" />
+          <span class="checkbox-label">{{ field.label }}</span>
+        </label>
+        <template v-else>
+          <span class="field-label">{{ field.label }}</span>
+          <StyledSelect v-if="field.type === 'select'" class="engine-select" :disabled="disabled" :model-value="valueOf(field.id)" :options="optionsFor(field)" :ariaLabel="mapping.source_name + ' ' + field.label" @update:model-value="setValue(field.id, $event)" />
+          <input v-else class="input-glass" :value="valueOf(field.id)" :aria-label="mapping.source_name + ' ' + field.label" @change="setValue(field.id, ($event.target as HTMLInputElement).value)" />
+        </template>
+      </div>
+    </fieldset>
 
     <!-- 分隔线 -->
     <div class="card-divider"></div>
@@ -179,7 +97,7 @@ const engineColor = computed(() => {
           class="ratio-fill"
           :style="{
             width: mapping.compression_ratio,
-            background: `linear-gradient(90deg, ${ratioColor}, ${ratioColor}dd)`,
+            background: ratioColor,
           }"
         ></div>
       </div>
@@ -196,6 +114,17 @@ const engineColor = computed(() => {
 </template>
 
 <style scoped>
+.metadata-editor { border: 0; padding: 0; margin: 0; min-width: 0; }
+.password-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.password-value { font: 12px "Cascadia Mono", Consolas, monospace; color: var(--text-primary); overflow-wrap: anywhere; user-select: text; }
+.hash-details { font-size: 11px; color: var(--text-secondary); }
+.hash-details summary { cursor: pointer; }
+.hash-entry { display: grid; gap: 4px; margin-top: 8px; }
+.hash-entry code { overflow-wrap: anywhere; color: var(--text-primary); user-select: text; }
+.metadata-editor:disabled { opacity: .65; }
+.notes-field { grid-column: 1 / -1; }
+.notes-input { width: 100%; resize: vertical; min-height: 65px; font: inherit; font-size: 13px; }
+
 .game-card {
   padding: 14px;
   display: flex;
@@ -315,6 +244,7 @@ const engineColor = computed(() => {
 
 /* APK 复选框 */
 .checkbox-field {
+  display: flex;
   grid-column: 1 / -1;
   flex-direction: row !important;
   align-items: center;

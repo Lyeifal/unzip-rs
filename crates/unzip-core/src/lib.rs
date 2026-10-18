@@ -1,6 +1,8 @@
 //! unzip-core — 自动解压核心库。
 
 pub mod assemble;
+pub mod archive_hash;
+pub mod archive_catalog;
 pub mod config;
 pub mod extract;
 pub mod lz4mini;
@@ -8,6 +10,7 @@ pub mod pack;
 pub mod pipeline;
 pub mod scan;
 pub mod sniff;
+pub mod storage;
 pub mod types;
 
 pub use config::{

@@ -41,18 +41,29 @@ pub fn scan_sources(
 ) -> ScanResult {
     let product_exts: Vec<String> = cfg.product_exts.iter().map(|e| e.to_lowercase()).collect();
     let mut scan = ScanResult::default();
+    let mut groups = Vec::new();
+    let mut selected_by_parent: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    let mut explicit_files = HashSet::new();
     for root in roots {
-        if !root.is_dir() {
+        if root.is_file() {
+            selected_by_parent.entry(root.parent().unwrap_or(Path::new(".")).to_path_buf()).or_default().push(root.clone());
+            explicit_files.insert(normalize(root));
+        } else if root.is_dir() {
+            let files: Vec<PathBuf> = WalkDir::new(root)
+                .max_depth(if recursive { usize::MAX } else { 1 })
+                .into_iter().filter_map(|e| e.ok()).map(walkdir::DirEntry::into_path)
+                .filter(|p| p.is_file()).collect();
+            groups.push(files);
+        } else {
             scan.warns.push(format!("源目录不存在：{}", root.display()));
-            continue;
         }
-        let files: Vec<PathBuf> = WalkDir::new(root)
-            .max_depth(if recursive { usize::MAX } else { 1 })
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .map(walkdir::DirEntry::into_path)
-            .filter(|p| p.is_file())
-            .collect();
+    }
+    // Keep selected siblings in the same two-pass group, including a main rar
+    // selected before its .r00 companions. Never enumerate a file's parent.
+    groups.extend(selected_by_parent.into_values());
+    let mut visited = HashSet::new();
+    for files in groups {
+        let files: Vec<_> = files.into_iter().filter(|p| visited.insert(normalize(p))).collect();
 
         // kinds 备忘：同一文件两遍扫描只嗅探一次（嵌入识别有大窗口 I/O，媒体多的树省一半）
         let mut kinds: std::collections::HashMap<PathBuf, Option<&'static str>> =
@@ -68,7 +79,7 @@ pub fn scan_sources(
         // 分卷，第二遍再补位，结果与顺序无关（唯一的行为改进，其余逻辑相同）。
         let mut consumed: HashSet<PathBuf> = HashSet::new();
         for f in &files {
-            if is_skipped_location(f, out_root, failed_root) {
+            if !explicit_files.contains(&normalize(f)) && is_skipped_location(f, out_root, failed_root) {
                 continue;
             }
             let lower = file_name_string(f).to_lowercase();
@@ -99,7 +110,7 @@ pub fn scan_sources(
             if consumed.contains(f) {
                 continue;
             }
-            if is_skipped_location(f, out_root, failed_root) {
+            if !explicit_files.contains(&normalize(f)) && is_skipped_location(f, out_root, failed_root) {
                 continue;
             }
             let lower = file_name_string(f).to_lowercase();
@@ -121,18 +132,14 @@ pub fn scan_sources(
                 Some(pkg_kind) => {
                     // 主卷补位：stem.rar / stem.zip（volumes 已收齐，判定与顺序无关）
                     if lower.ends_with(".rar")
-                        && scan
-                            .volumes
-                            .contains_key(&(VolFamily::RarR, lower[..lower.len() - 4].to_string()))
+                        && scan.volumes.contains_key(&(VolFamily::RarR, lower[..lower.len() - 4].to_string()))
                     {
                         scan.vol_firsts
                             .insert((VolFamily::RarR, lower[..lower.len() - 4].to_string()), f.clone());
                         continue;
                     }
                     if lower.ends_with(".zip")
-                        && scan
-                            .volumes
-                            .contains_key(&(VolFamily::ZipZ, lower[..lower.len() - 4].to_string()))
+                        && scan.volumes.contains_key(&(VolFamily::ZipZ, lower[..lower.len() - 4].to_string()))
                     {
                         scan.vol_firsts
                             .insert((VolFamily::ZipZ, lower[..lower.len() - 4].to_string()), f.clone());
@@ -227,6 +234,7 @@ fn make_pkg(
     let mut root = None;
     let mut rel = None;
     for r in roots {
+        if r.is_file() { continue; }
         // resolve(strict=False) 后取相对路径
         if let Ok(stripped) = normalize(first).strip_prefix(normalize(r)) {
             root = Some(r.clone());
@@ -264,6 +272,35 @@ mod tests {
     const RAR_MAGIC: &[u8] = b"Rar!\x1a\x07\x01\x00";
     const SEVENZ_MAGIC: &[u8] = b"7z\xbc\xaf\x27\x1c";
     const JPG_MAGIC: &[u8] = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00";
+
+    #[test]
+    fn explicit_files_do_not_scan_unselected_neighbors_and_use_parent_root() {
+        let dir = tempdir().unwrap();
+        let selected = write(dir.path(), "选中.zip", ZIP_MAGIC);
+        write(dir.path(), "不要处理.zip", ZIP_MAGIC);
+        let roots = vec![selected.clone(), selected.clone()];
+        let mut scan = scan_sources(&roots, true, &cfg(), Some(dir.path()), None);
+        let pkgs = build_packages(&mut scan, &roots);
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].first, selected);
+        assert_eq!(pkgs[0].root, dir.path());
+        assert_eq!(pkgs[0].rel, PathBuf::from("选中.zip"));
+    }
+
+    #[test]
+    fn explicit_main_rar_and_companion_are_grouped_in_both_orders() {
+        let dir = tempdir().unwrap();
+        let first = write(dir.path(), "sample.rar", RAR_MAGIC);
+        let second = write(dir.path(), "sample.r01", RAR_MAGIC);
+        for roots in [vec![first.clone(), second.clone()], vec![second.clone(), first.clone()]] {
+            let mut scan = scan_sources(&roots, true, &cfg(), None, None);
+            let pkgs = build_packages(&mut scan, &roots);
+            assert_eq!(pkgs.len(), 1);
+            assert_eq!(pkgs[0].first, first);
+            assert_eq!(pkgs[0].vol_family, Some(VolFamily::RarR));
+            assert_eq!(pkgs[0].volumes.len(), 1);
+        }
+    }
 
     fn write(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
         let p = dir.join(name);

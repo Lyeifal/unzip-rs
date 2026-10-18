@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, useId } from "vue";
 import type { SelectOption } from "../types/select";
 
 const props = defineProps<{
@@ -7,14 +7,14 @@ const props = defineProps<{
   options: SelectOption[];
   ariaLabel: string;
   placeholder?: string;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: string | number];
 }>();
 
-let nextId = 0;
-const listId = `styled-select-${++nextId}`;
+const listId = `styled-select-${useId()}`;
 const root = ref<HTMLElement | null>(null);
 const open = ref(false);
 const openAbove = ref(false);
@@ -28,6 +28,7 @@ const selectedLabel = computed(() =>
 );
 
 function showMenu() {
+  if (props.disabled || !props.options.length) return;
   open.value = true;
   activeIndex.value = selectedIndex.value >= 0 ? selectedIndex.value : 0;
   const bounds = root.value?.getBoundingClientRect();
@@ -80,6 +81,7 @@ onUnmounted(() => document.removeEventListener("pointerdown", onDocumentPointerD
   <div ref="root" class="select-field">
     <button
       type="button"
+      :disabled="disabled"
       class="select-control"
       role="combobox"
       aria-haspopup="listbox"

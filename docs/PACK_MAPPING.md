@@ -1,173 +1,131 @@
-# 打包映射文件说明
+# 压缩记录与映射格式
 
-## 概述
+更新日期：2026-10-16。本文描述当前记录格式以及 SQLite 与 JSON 导入导出的兼容约定。
 
-从本版本开始，批量压缩功能会在输出目录自动生成 `pack_mapping.json` 文件，记录源文件/目录与生成的压缩包之间的对应关系。
+## 保存位置与时机
 
-**新特性：**
-- ✨ **增量更新**：重复打包会自动合并，按压缩包名去重
-- 📊 **详细统计**：记录压缩前后大小（bytes/MB/GB）和压缩率
-- 💾 **配置记忆**：GUI 自动记住上次使用的输出目录、密码和模板文案
+Windows 默认正式记录文件为 `%APPDATA%\unzip-rs\pack_mapping.sqlite3`。每成功打包一个条目，立即合并保存其名称、密码、大小和各产物哈希；正常情况下，输出目录只保存压缩文件。首次使用数据库时，若同目录存在旧 `pack_mapping.json`，会在事务中导入并保留原文件。
 
-## 文件位置
+集中保存失败会显示警告，并尝试在打包输出目录写入 `pack_mapping.json` 恢复副本。两处都失败时，应保存打包结果中的密码。哈希计算取消或读取失败不会删除已产出的压缩文件，记录中可能只有部分哈希。
 
-- 文件名：`pack_mapping.json`
-- 位置：与压缩包相同的输出目录
-- 更新方式：增量合并（按 archive_name 去重）
+CLI 可通过 `UNZIP_CATALOG_PATH` 指定旧 JSON 路径及同名 `.sqlite3` 数据库位置；GUI 启动时使用自己的应用数据目录。配置、记录与界面偏好的位置见 [数据存储说明](./STORAGE.md)。
 
-## 文件结构
+## JSON 导入导出结构
+
+以下是带备注的旧记录导入后的示意，没有哈希。完整的单文件、分卷和旧字段示例见 [示例文件](./examples/pack_mapping_example.json)。
+
+示例文件带有 `example_only: true` 标记，路径、大小、密码及重复数字组成的哈希均为展示数据，不对应真实压缩文件，不可用于实际完整性验证。
 
 ```json
 {
-  "generated_at": "2026-10-14",           // 最后更新日期
-  "total_count": 3,                       // 总记录数（含历史）
-  "mappings": [                           // 映射列表（按包名排序）
+  "schema_version": 2,
+  "generated_at": "2026-10-16",
+  "updated_at_unix": 1792108800,
+  "total_count": 1,
+  "mappings": [
     {
-      "source_name": "游戏本体",          // 源文件/目录名称
-      "archive_name": "G001.7z",          // 压缩包名称
-      "password": "aB3dEfGh5jKmNpQr",     // 密码（null 表示无密码）
-      
-      "source_size": {                    // 压缩前大小
-        "bytes": 524288000,
-        "mb": "500.00",
-        "gb": "0.488",
-        "human": "500.0 MB"
-      },
-      
-      "compressed_size": {                // 压缩后大小
-        "bytes": 456123456,
-        "mb": "435.07",
-        "gb": "0.425",
-        "human": "435.1 MB"
-      },
-      
-      "compression_ratio": "87.0%",       // 压缩率
-      "is_volume": false,                 // 是否分卷
-      "volume_count": 1,                  // 分卷数
-      "created_at": "2026-10-14"          // 创建日期
+      "record_id": "d:/archives/documents.zip",
+      "archive_path": "D:\\Archives\\Documents.zip",
+      "output_dir": "D:\\Archives",
+      "source_name": "项目文档",
+      "archive_name": "Documents.zip",
+      "password": null,
+      "source_size": { "bytes": 1024, "mb": "0.00", "gb": "0.000", "human": "1024 B" },
+      "compressed_size": { "bytes": 512, "mb": "0.00", "gb": "0.000", "human": "512 B" },
+      "compression_ratio": "50.0%",
+      "is_volume": false,
+      "volume_count": 1,
+      "created_at": "2026-10-16",
+      "metadata": {
+        "schema_version": 1,
+        "notes": "工作文档备份",
+        "custom_fields": { "category": "文档", "organized": true }
+      }
     }
   ]
 }
 ```
 
-## 字段说明
-
 ### 顶层字段
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `generated_at` | string | 最后更新日期，格式 YYYY-MM-DD |
-| `total_count` | number | 总记录数（含历史打包） |
-| `mappings` | array | 映射关系数组（按 archive_name 排序） |
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `schema_version` | number | 集中记录格式版本，当前为 `2` |
+| `generated_at` | string | 最近一次保存日期，`YYYY-MM-DD`；尚未保存的空库可为空字符串 |
+| `updated_at_unix` | number，可选 | 最近一次保存的 Unix 时间戳，单位为秒；旧记录和尚未保存的空库可缺省 |
+| `total_count` | number | 条目数量，一组分卷计为一个条目 |
+| `mappings` | array | 压缩记录；文件中的顺序不保证按名称排序，管理页负责排序 |
 
-### mappings 数组元素
+### 每条压缩记录
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `source_name` | string | 源文件或目录的名称 |
-| `archive_name` | string | 生成的压缩包名称。单卷时为 `G001.7z`；分卷时为首卷完整文件名 `G002.7z.001` |
-| `password` | string \| null | 压缩包密码。`null` 表示无密码 |
-| `source_size` | object | 压缩前大小（bytes / mb / gb / human） |
-| `compressed_size` | object | 压缩后大小（所有分卷总和） |
-| `compression_ratio` | string | 压缩率（如 "87.0%"） |
-| `is_volume` | boolean | 是否为分卷压缩包 |
-| `volume_count` | number | 分卷数量。单卷为 1，多卷为实际分卷数 |
-| `created_at` | string | 创建/更新日期 |
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `record_id` | string | 根据压缩文件绝对路径生成的标识；Windows 下统一斜杠并转为小写 |
+| `archive_path` | string | 打包时压缩文件的绝对路径；分卷为首卷路径 |
+| `output_dir` | string | 压缩文件所在目录 |
+| `source_name` | string | 源文件或目录名称 |
+| `archive_name` | string | 压缩文件名；分卷为首卷完整名称，如 `G002.7z.001` |
+| `password` | string 或 null | 解压密码；`null` 表示无密码 |
+| `source_size` | object | 源内容大小：`bytes` 为整数，`mb/gb/human` 为显示字符串 |
+| `compressed_size` | object | 压缩产物大小，分卷时为所有分卷之和 |
+| `compression_ratio` | string | 压缩后大小 / 源大小，例如 `70.0%`；超过 100% 也是有效结果 |
+| `is_volume` | boolean | 实际产物是否多于一个文件 |
+| `volume_count` | number | 实际产物文件数量 |
+| `created_at` | string | 条目打包日期，更新备注不会修改此字段 |
+| `hash_algorithm` | string，可选 | 新打包记录为 `sha256` |
+| `output_hashes` | array，可选 | 各产物的 `file_name`、`size_bytes` 和 64 位十六进制 `sha256` |
+| `metadata` | object，可选 | 备注与用户自定义字段；未编辑的条目可能没有此字段 |
 
-## 增量更新机制
+顶层 `schema_version: 2` 与 `metadata.schema_version: 1` 分别控制记录格式和旧字段迁移，含义不同。
 
-**自动去重：**
-- 同一输出目录多次打包会自动合并记录
-- 按 `archive_name` 去重：同名压缩包自动覆盖旧记录
-- 不同压缩包累积保存，形成完整历史
+## 合并与同名文件
 
-**使用场景：**
-```bash
-# 第一批打包
-打包 → G001.7z, G002.7z
-结果：pack_mapping.json 包含 2 条记录
+- 集中记录按 `record_id` 合并，同名但不同输出路径的压缩包分别保存。
+- 打包记录更新会保留该条目已有的备注、元数据和未知属性。
+- 编辑备注只提交条目 ID 与元数据，不回写整份前端缓存，避免覆盖同时产生的新记录。
+- 压缩文件实际移动后，已有记录的路径不会自动更新；内容哈希仍可用于查找密码。
+- 记录集合只保存每个路径的当前条目，不是同一路径下所有历史内容的完整版本库。
 
-# 第二批打包（同一输出目录）
-打包 → G003.7z, G004.7z
-结果：pack_mapping.json 包含 4 条记录（累积）
+## 哈希匹配密码
 
-# 重新打包 G001（同名覆盖）
-打包 → G001.7z
-结果：pack_mapping.json 包含 4 条记录（G001 信息已更新）
-```
+1. 打包完成且单文件分卷改名结束后，流式计算每个产物的 SHA-256。
+2. 解压任务启用 `hash_match` 时，按输入文件大小查询数据库中的哈希索引行，并缓存本次任务查过的大小；该大小存在密码候选时才计算文件哈希。
+3. 输入文件大小有候选时才计算哈希。命中后将记录密码放在规则、密码库和运行时追加密码之前尝试；解压器仍保留原有无密码探测。
+4. 未命中、记录不可读、哈希无效或密码错误时，继续使用原有密码流程。
 
-## 使用场景
+分卷通过待处理首卷查找密码，**首卷命中不等于整组分卷完整**，后续仍由解压器检查。关闭 `hash_match`、执行预演或处理 APK 等直接落位的产物时，不计算解压输入哈希。没有哈希的旧记录仍可整理，但不会自动补算哈希。
 
-1. **批量管理**：快速查找某个源文件对应的压缩包名称和密码
-2. **压缩分析**：查看压缩率，评估哪些文件适合压缩
-3. **自动化脚本**：解析 JSON 文件进行后续处理（上传、重命名等）
-4. **档案管理**：记录打包历史，方便日后查询
-5. **密码管理**：集中存储随机生成的密码，避免丢失
-6. **增量备份**：同一目录多次打包自动累积记录
+## 管理字段与密码显示
 
-## GUI 配置记忆
+“应用设置 → 压缩包管理”可添加文本、下拉和勾选字段，也可控制密码是否显示，默认隐藏。备注保存在 `metadata.notes`；字段值保存在 `metadata.custom_fields`，按稳定字段 ID 对应。
 
-打包页会自动记住上次成功打包时的配置：
-- ✅ 输出目录
-- ✅ 压缩密码（统一密码模式）
-- ✅ 模板文案
-- ✅ 其他所有打包选项
+旧 `version` 会在迁移时并入备注；旧 `engine` 和 APK 标记会迁入自定义字段，原始属性保留。移除字段定义或选项不会删除记录中的值。字段定义保存在本机 WebView localStorage，记录 JSON 只保存字段值。
 
-配置存储在浏览器 localStorage，重启应用后自动恢复。
+密码显示开关仅控制管理卡片。JSON、备份、打包结果和日志可能包含明文密码。
 
-## 示例用法
+## 导入、导出与备份
 
-### Python 读取示例
+- 管理页首次挂载时尝试导入上次管理目录和打包输出目录中的旧 `pack_mapping.json`。其他目录可通过“导入旧 JSON”选择。
+- 旧记录根据原 JSON 所在目录和文件名补齐路径及 ID；包含有效绝对 `archive_path` 的记录沿用该路径。
+- 同路径已有集中记录优先，重复导入不会覆盖集中记录中的新备注。导入保留原 JSON，也不搬动压缩文件。
+- “导出备份”另存完整记录，导出位置应在应用记录目录之外。导出不包含主题或自定义字段定义。
+- 集中保存使用 SQLite 事务。首次迁移遇到无效旧 JSON 时会报错并保留原文件，不会用空记录覆盖它；迁移完成后数据库是正式记录。
 
-```python
-import json
+恢复时，可将导出的 JSON 导入到空数据库；已有同路径记录会被保留。旧版留下的 `.bak` 是旧 JSON 的上一份快照，不是当前数据库的自动备份。需要从旧 JSON 重新迁移时，先退出 GUI 和 CLI，并单独保留现有数据库与原文件，再进行恢复。
 
-with open('pack_mapping.json', 'r', encoding='utf-8') as f:
-    data = json.load(f)
+## 只读脚本示例
 
-# 查找特定源文件对应的压缩包
-source = "游戏本体"
-for mapping in data['mappings']:
-    if mapping['source_name'] == source:
-        print(f"压缩包：{mapping['archive_name']}")
-        print(f"密码：{mapping['password']}")
-        print(f"压缩前：{mapping['source_size']['human']}")
-        print(f"压缩后：{mapping['compressed_size']['human']}")
-        print(f"压缩率：{mapping['compression_ratio']}")
-        break
-
-# 分析压缩效果
-for m in data['mappings']:
-    ratio = float(m['compression_ratio'].rstrip('%'))
-    if ratio < 50:
-        print(f"{m['archive_name']} 压缩效果显著（{m['compression_ratio']}）")
-```
-
-### PowerShell 读取示例
+PowerShell 可读取管理页“导出备份”生成的 JSON，只输出名称和哈希，不显示密码：
 
 ```powershell
-$json = Get-Content pack_mapping.json -Raw | ConvertFrom-Json
-
-# 列出所有映射
-foreach ($mapping in $json.mappings) {
-    Write-Host "$($mapping.source_name) -> $($mapping.archive_name)"
-    if ($mapping.password) {
-        Write-Host "  密码: $($mapping.password)"
+$catalogPath = 'D:\Backups\pack_mapping_backup.json' # 改为实际导出路径
+$catalog = Get-Content -LiteralPath $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($entry in $catalog.mappings) {
+    Write-Output "$($entry.source_name) -> $($entry.archive_path)"
+    foreach ($hash in $entry.output_hashes) {
+        Write-Output "  $($hash.file_name): $($hash.sha256)"
     }
 }
 ```
 
-## 注意事项
-
-1. **增量更新**：同一输出目录重复打包会合并记录，不会覆盖整个文件
-2. **去重规则**：按 `archive_name` 去重，同名压缩包会更新记录
-3. **压缩后大小**：为所有分卷文件的总和（多卷时需全部下载完才能解压）
-4. **生成时机**：只有成功打包的项目会记录，失败的不会写入
-5. **映射文件丢失**：下次打包会创建新文件，历史记录无法恢复
-6. **分卷识别**：`archive_name` 显示首卷完整文件名（如 `G002.7z.001`），其他分卷按序递增
-7. **压缩率异常**：压缩后比原文件大（>100%）是正常现象，常见于已压缩的文件（图片、视频、已压缩包）
-8. **配置记忆**：GUI 的配置记忆存储在浏览器，清除浏览器数据会丢失
-
-## 完整示例
-
-参见项目 `docs/examples/pack_mapping_example.json` 文件。
+应用运行时应通过管理页修改记录，不要用外部脚本直接修改数据库。

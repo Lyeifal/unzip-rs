@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import StyledSelect from "./StyledSelect.vue";
 import type { SelectOption } from "../types/select";
+import { useShellQueue } from '../composables/useShellQueue';
+import { waitForToolPathsSave } from '../composables/useToolPaths';
 import {
   defaultPackOptions,
   fmtSize,
-  nextName,
   sanitizeName,
   savePackOptions,
   type PackSummaryPayload,
@@ -29,9 +30,10 @@ const compressionLevelOptions: SelectOption[] = [
 ];
 
 const opts = reactive(defaultPackOptions());
-const items = ref<string[]>([]);
+const items = useShellQueue().packPaths;
 const itemSel = ref(-1);
 const running = ref(false);
+const starting = ref(false);
 const logs = ref<{ msg: string; level: string }[]>([]);
 const logBox = ref<HTMLElement | null>(null);
 const done = ref(0);
@@ -39,22 +41,73 @@ const total = ref(0);
 const current = ref("");
 const summary = ref<PackSummaryPayload | null>(null);
 const copiedIdx = ref(-1);
+const namePreview = ref<string[]>([]);
+const previewError = ref('');
+const previewLoading = ref(false);
+const newPrefix = ref('');
+const newSuffix = ref('');
+const affixError = ref('');
+const AFFIX_KEY = 'pack_name_affixes_v1';
+function savedAffixes(): { prefixes: string[]; suffixes: string[] } {
+  try {
+    const data = JSON.parse(localStorage.getItem(AFFIX_KEY) ?? '{}');
+    const values = (source: unknown): string[] => Array.isArray(source)
+      ? [...new Set(source.filter((value): value is string => typeof value === 'string' && !!value.trim() && value.trim().length <= 80 && sanitizeName(value.trim()) === value.trim()).map(value => value.trim()))]
+      : [];
+    return { prefixes: values(data.prefixes), suffixes: values(data.suffixes) };
+  } catch { return { prefixes: [], suffixes: [] }; }
+}
+const saved = savedAffixes();
+const prefixes = ref([...new Set(['G', 'H', 'HG', ...saved.prefixes, opts.name_prefix].filter(Boolean))]);
+const suffixes = ref([...new Set([...saved.suffixes, opts.name_suffix].filter(Boolean))]);
+const prefixOptions = computed<SelectOption[]>(() => prefixes.value.map(value => ({ value, label: value })));
+const suffixOptions = computed<SelectOption[]>(() => suffixes.value.map(value => ({ value, label: value })));
 
 let unlisteners: UnlistenFn[] = [];
+let previewTimer: ReturnType<typeof setTimeout> | undefined;
+let previewToken = 0;
 
-// 包名预览：与 Rust next_name 同一算法（宽度保留、溢出进位）。
-const namePreview = computed(() => {
-  const step = opts.name_step > 0 ? opts.name_step : 1;
-  let name = sanitizeName(opts.name_start.trim()) || "Pack";
-  const names: string[] = [];
-  for (let i = 0; i < items.value.length; i++) {
-    names.push(name);
-    name = nextName(name, step);
+const validNameStart = computed(() => /^[0-9]{1,18}$/.test(opts.number_start.trim())
+    && Number.isInteger(opts.name_step) && opts.name_step > 0
+    && (!opts.prefix_enabled || (!!opts.name_prefix && opts.name_prefix.length <= 80 && sanitizeName(opts.name_prefix) === opts.name_prefix))
+    && (!opts.suffix_enabled || (!!opts.name_suffix && opts.name_suffix.length <= 80 && sanitizeName(opts.name_suffix) === opts.name_suffix)));
+
+function persistAffixes() {
+  try { localStorage.setItem(AFFIX_KEY, JSON.stringify({ prefixes: prefixes.value, suffixes: suffixes.value })); }
+  catch { affixError.value = '前后缀列表保存失败，请检查本机存储空间。'; }
+}
+function addAffix(kind: 'prefix' | 'suffix') {
+  const value = (kind === 'prefix' ? newPrefix.value : newSuffix.value).trim();
+  if (!value || value.length > 80 || sanitizeName(value) !== value) {
+    affixError.value = '请填写 1–80 个字符的有效前缀或后缀，不能含文件名非法字符。';
+    return;
   }
-  return names;
-});
-
-const validNameStart = computed(() => sanitizeName(opts.name_start.trim()).length > 0);
+  const values = kind === 'prefix' ? prefixes : suffixes;
+  if (!values.value.includes(value)) values.value.push(value);
+  if (kind === 'prefix') { opts.name_prefix = value; opts.prefix_enabled = true; newPrefix.value = ''; }
+  else { opts.name_suffix = value; opts.suffix_enabled = true; newSuffix.value = ''; }
+  affixError.value = '';
+  persistAffixes();
+}
+async function refreshPreview() {
+  const token = ++previewToken;
+  if (!validNameStart.value) { namePreview.value = []; previewError.value = ''; previewLoading.value = false; return; }
+  previewLoading.value = true;
+  try {
+    const names = await invoke<string[]>('preview_pack_names', { options: { ...opts }, count: Math.max(1, items.value.length) });
+    if (!Array.isArray(names) || !names.every(name => typeof name === 'string')) throw new Error('预览结果格式无效');
+    if (token === previewToken) { namePreview.value = names; previewError.value = ''; }
+  } catch (error) {
+    if (token === previewToken) { namePreview.value = []; previewError.value = String(error); }
+  } finally { if (token === previewToken) previewLoading.value = false; }
+}
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewToken++;
+  previewTimer = setTimeout(() => void refreshPreview(), 180);
+}
+watch(() => [opts.name_prefix, opts.name_suffix, opts.prefix_enabled,
+  opts.suffix_enabled, opts.number_start, opts.name_step, opts.auto_number, opts.format, items.value.length], schedulePreview, { immediate: true });
 
 // ---------- 日志 ----------
 
@@ -118,34 +171,37 @@ async function browseOutDir() {
 // ---------- 运行控制 ----------
 
 async function start() {
-  if (running.value) return;
+  if (running.value || starting.value) return;
   if (!items.value.length) {
     appendLog("[警告] 请先添加要打包的文件或目录", "warn");
     return;
   }
   if (!validNameStart.value) {
-    appendLog("[警告] 请填写有效的起始包名", "warn");
-    return;
-  }
-  if (!opts.output_dir.trim()) {
-    appendLog("[警告] 请先选择打包输出目录", "warn");
+    appendLog("[警告] 请填写有效的数字起点、步长及已启用的前后缀", "warn");
     return;
   }
   if (opts.password_mode === "manual" && !opts.uniform_password.trim()) {
     appendLog("[警告] 统一密码模式：密码为空将按无密码打包", "warn");
   }
+  starting.value = true;
   try {
+    if (!opts.output_dir.trim()) {
+      appendLog("[提示] 请选择打包输出目录", "info");
+      await browseOutDir();
+      if (!opts.output_dir.trim()) return;
+    }
     logs.value = [];
     summary.value = null;
     done.value = 0;
     total.value = 0;
     current.value = "";
     running.value = true;
+    await waitForToolPathsSave();
     await invoke("start_pack", { options: { ...opts }, files: [...items.value] });
   } catch (e) {
     running.value = false;
     appendLog(`[失败] ${e}`, "error");
-  }
+  } finally { starting.value = false; }
 }
 
 async function stop() {
@@ -168,6 +224,7 @@ function onDone(s: PackSummaryPayload) {
   if (s.ok.length > 0) {
     savePackOptions(opts);
   }
+  void refreshPreview();
 
   nextTick(() => {
     const el = logBox.value;
@@ -208,7 +265,11 @@ onMounted(async () => {
   );
 });
 
+onActivated(() => void refreshPreview());
+
 onUnmounted(() => {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewToken++;
   for (const u of unlisteners) u();
   unlisteners = [];
 });
@@ -231,7 +292,7 @@ onUnmounted(() => {
             @click.stop="itemSel = i"
           >
             <span class="src" :title="path">{{ path }}</span>
-            <span class="pack-name">{{ namePreview[i] }}.{{ opts.format }}</span>
+            <span class="pack-name">{{ namePreview[i] ? `${namePreview[i]}.${opts.format}` : '待计算' }}</span>
           </li>
         </ul>
         <div class="btns">
@@ -243,18 +304,45 @@ onUnmounted(() => {
           <button class="btn-glass" :disabled="!items.length" @click="clearItems">清空</button>
         </div>
       </div>
-      <p class="hint">右侧为包名预览：打包时从起始名开始，末尾数字按步长逐个递增。</p>
+      <p class="hint">右侧为包名预览；真正开始打包时会再次检查压缩包管理记录，避免使用过期序号。</p>
     </section>
 
     <!-- 命名与输出 -->
     <section class="glass-card section-card">
       <div class="section-title">命名与输出</div>
-      <div class="row">
-        <label class="lbl">起始包名</label>
-        <input v-model="opts.name_start" class="input-glass" placeholder="如 G198、H113、HG19238" />
-        <label class="lbl" style="min-width: 36px">步长</label>
-        <input v-model.number="opts.name_step" type="number" min="1" class="input num" />
-      </div>
+        <div class="row">
+          <label class="lbl">前缀</label>
+          <label class="toggle-label"><input v-model="opts.prefix_enabled" type="checkbox" /> 启用前缀</label>
+          <StyledSelect v-model="opts.name_prefix" class="select" :disabled="!opts.prefix_enabled || !prefixOptions.length" :options="prefixOptions" ariaLabel="选择包名前缀" placeholder="先添加前缀" />
+        </div>
+        <div class="row">
+          <label class="lbl">添加新前缀</label>
+          <input v-model="newPrefix" class="input-glass affix-input" placeholder="例如 G、HG、合集_" @keydown.enter.prevent="addAffix('prefix')" />
+          <button class="btn-glass" type="button" @click="addAffix('prefix')">添加前缀</button>
+        </div>
+        <div class="row">
+          <label class="lbl">后缀</label>
+          <label class="toggle-label"><input v-model="opts.suffix_enabled" type="checkbox" /> 启用后缀</label>
+          <StyledSelect v-model="opts.name_suffix" class="select" :disabled="!opts.suffix_enabled || !suffixOptions.length" :options="suffixOptions" ariaLabel="选择包名后缀" placeholder="先添加后缀" />
+        </div>
+        <div class="row">
+          <label class="lbl">添加新后缀</label>
+          <input v-model="newSuffix" class="input-glass affix-input" placeholder="例如 _正式版、-备份" @keydown.enter.prevent="addAffix('suffix')" />
+          <button class="btn-glass" type="button" @click="addAffix('suffix')">添加后缀</button>
+        </div>
+        <div class="row">
+          <label class="lbl">数字起点</label>
+          <input v-model="opts.number_start" class="input-glass number-start-input" inputmode="numeric" pattern="[0-9]*" placeholder="001" aria-label="数字起点" />
+          <label class="lbl" style="min-width: 36px">步长</label>
+          <input v-model.number="opts.name_step" type="number" min="1" step="1" class="input num" aria-label="包名步长" />
+        </div>
+        <div class="row">
+          <label class="lbl">自动续号</label>
+          <label class="toggle-label"><input v-model="opts.auto_number" type="checkbox" aria-label="自动续号" /> 匹配压缩包管理中的前后缀，从最大序号之后开始</label>
+        </div>
+        <p v-if="affixError" class="naming-error" role="alert">{{ affixError }}</p>
+        <p v-if="previewError" class="naming-error" role="alert">序号预览失败：{{ previewError }}</p>
+        <p class="hint">{{ previewLoading ? '正在匹配已有记录…' : `下一包预览：${namePreview[0] ?? '请完成命名设置'}.${opts.format}` }}。关闭前缀或后缀后，该部分不参与命名或记录匹配。</p>
       <div class="row">
         <label class="lbl">打包输出目录</label>
         <input v-model="opts.output_dir" class="input-glass" placeholder="压缩包输出到此处" />
@@ -262,7 +350,7 @@ onUnmounted(() => {
       </div>
       <div class="row">
         <label class="lbl">压缩格式</label>
-        <StyledSelect v-model="opts.format" class="select" :options="formatOptions" aria-label="压缩格式" />
+        <StyledSelect v-model="opts.format" class="select" :options="formatOptions" ariaLabel="压缩格式" />
       </div>
       <div class="row">
         <label class="lbl">压缩级别</label>
@@ -270,7 +358,7 @@ onUnmounted(() => {
           v-model="opts.compression_level"
           class="select"
           :options="compressionLevelOptions"
-          aria-label="压缩级别"
+          ariaLabel="压缩级别"
         />
       </div>
     </section>
@@ -334,7 +422,7 @@ onUnmounted(() => {
 
     <!-- 运行 -->
     <div class="row run-row">
-      <button class="btn-glass btn-primary" :disabled="running" @click="start">开始打包</button>
+      <button class="btn-glass btn-primary" :disabled="running || starting" @click="start">开始打包</button>
       <button class="btn-glass btn-danger" :disabled="!running" @click="stop">停止</button>
       <span class="current">{{ current }}</span>
     </div>
@@ -395,3 +483,10 @@ onUnmounted(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.toggle-label { display: inline-flex; align-items: center; gap: 7px; color: var(--text-primary); }
+.affix-input { flex: 1 1 180px; min-width: 150px; }
+.number-start-input { width: 120px; max-width: 100%; }
+.naming-error { color: var(--error); margin: 0; font-size: 13px; }
+</style>

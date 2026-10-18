@@ -1,0 +1,73 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+      - name: Check Signing Key And Version
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Set TAURI_SIGNING_PRIVATE_KEY in repository Actions secrets first.' }
+          $version = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:GITHUB_REF_NAME -ne "v$version") { throw "Run this workflow on tag v$version." }
+      - name: Install Frontend Dependencies
+        working-directory: app
+        run: npm ci
+      - name: Sync Bundled Tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force app/src-tauri/resources/bundled | Out-Null
+          Copy-Item assets/bundled/* app/src-tauri/resources/bundled -Recurse -Force
+      - name: Test Backend
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml --locked
+      - name: Build Signed Update
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --config src-tauri/tauri.release.conf.json
+      - name: Prepare Update Manifest
+        working-directory: app
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/prepare-release.mjs
+      - name: Verify Update Signature
+        run: cargo run --manifest-path app/src-tauri/Cargo.toml --example verify_update --locked -- app/src-tauri/target/release/update
+      - name: Save Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-update
+          path: app/src-tauri/target/release/update/*
+      - name: Create Release Draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $assets = Get-ChildItem app/src-tauri/target/release/update -File | Select-Object -ExpandProperty FullName
+          gh release create $env:RELEASE_TAG @assets --draft --verify-tag --title "unzip-rs $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release draft creation failed.' }

@@ -1,20 +1,21 @@
-"""生成 app 图标源图：1024x1024 蓝底圆角方块 + 白色「解」字。"""
-from PIL import Image, ImageDraw, ImageFont
+"""Generate a black rounded archive icon on a transparent canvas."""
+from pathlib import Path
+from PIL import Image, ImageDraw
 
 SIZE = 1024
-RADIUS = 180
-BG = (47, 129, 247, 255)  # #2f81f7 主按钮蓝
+APP = Path(__file__).resolve().parents[1]
+INK = (0, 0, 0, 255)
 
 img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
-draw.rounded_rectangle([0, 0, SIZE - 1, SIZE - 1], radius=RADIUS, fill=BG)
+draw.rounded_rectangle((128, 96, 896, 928), radius=144, outline=INK, width=72)
 
-font = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 560)
-text = "解"
-bbox = draw.textbbox((0, 0), text, font=font)
-tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-pos = ((SIZE - tw) / 2 - bbox[0], (SIZE - th) / 2 - bbox[1])
-draw.text(pos, text, font=font, fill=(255, 255, 255, 255))
+for index, top in enumerate(range(176, 576, 80)):
+    left = 432 if index % 2 == 0 else 512
+    draw.rounded_rectangle((left, top, left + 80, top + 56), radius=12, fill=INK)
+draw.rounded_rectangle((416, 592, 608, 808), radius=64, fill=INK)
+draw.rounded_rectangle((472, 672, 552, 744), radius=22, fill=(0, 0, 0, 0))
 
-img.save(r"D:\Code\unzip-rs\app\src-tauri\icons\icon.png")
-print("icon.png written", img.size)
+img.save(APP / "src-tauri/icons/icon.png")
+img.resize((256, 256), Image.Resampling.LANCZOS).save(APP / "public/app-icon.png")
+print("Generated black transparent archive icon")

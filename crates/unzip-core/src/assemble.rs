@@ -45,7 +45,7 @@ fn dedup(items: &[String]) -> Vec<String> {
 /// rar 族用 unrar 循环试前 4 个密码（空密码不带 -p）；非 rar 用 7z `t -p`，rc≤1 为 ok。
 fn test_archive(ex: &Extractor, path: &Path, is_rar: bool, passwords: &[String]) -> (bool, String) {
     if is_rar {
-        let mut cand = vec![String::new()];
+        let mut cand = if ex.retry_password_only() { Vec::new() } else { vec![String::new()] };
         cand.extend(passwords.iter().cloned());
         let mut text = String::new();
         for pw in dedup(&cand).iter().take(4) {
@@ -64,10 +64,13 @@ fn test_archive(ex: &Extractor, path: &Path, is_rar: bool, passwords: &[String])
         }
         (false, text)
     } else {
+        let probe_password = if ex.retry_password_only() {
+            passwords.first().map(|p| format!("-p{p}")).unwrap_or_else(|| "-p".to_string())
+        } else { "-p".to_string() };
         match ex.run_7z(&[
             "t".to_string(),
             path.to_string_lossy().into_owned(),
-            "-p".to_string(),
+            probe_password,
         ]) {
             None => (false, "找不到 7z.exe".to_string()),
             Some(r) => (r.code.is_some_and(|c| c <= 1), r.text),

@@ -37,6 +37,7 @@ pub struct Extractor {
     unrar: Option<PathBuf>,
     lz4: Option<PathBuf>,
     lz4_cfg: String, // 配置原文（trim 后），仅用于错误文案
+    retry_password_only: bool,
 }
 
 /// 跑外部工具：stdin 置空、stdout+stderr 合并 lossy、CREATE_NO_WINDOW。
@@ -106,6 +107,7 @@ impl Extractor {
             unrar: pick(&cfg.unrar, &["UnRAR.exe"]),
             lz4,
             lz4_cfg,
+            retry_password_only: cfg.retry_password_only,
         }
     }
 
@@ -130,6 +132,10 @@ impl Extractor {
         self.seven_zip.is_some()
     }
 
+    pub fn retry_password_only(&self) -> bool {
+        self.retry_password_only
+    }
+
     /// 跑 unrar（自动附加 -y）。
     pub fn run_unrar(&self, args: &[String]) -> Option<ProcResult> {
         run_exe(self.unrar.as_deref()?, None, &["-y"], args)
@@ -143,7 +149,7 @@ impl Extractor {
         dest: &Path,
         passwords: &[String],
     ) -> Result<Option<String>, String> {
-        let mut candidates: Vec<String> = vec![String::new()];
+        let mut candidates: Vec<String> = if self.retry_password_only { Vec::new() } else { vec![String::new()] };
         for p in passwords {
             if !candidates.contains(p) {
                 candidates.push(p.clone());
@@ -151,6 +157,7 @@ impl Extractor {
         }
         let mut last_text = String::new();
         let mut tried = 0usize;
+        let mut all_wrong_password = true;
         for pw in &candidates {
             tried += 1;
             let Some(r) = self.run_7z(&[
@@ -176,10 +183,14 @@ impl Extractor {
                 return Err(format!("测试通过但解压失败：{}", tail_line(&r2.text)));
             }
             let low = r.text.to_lowercase();
-            if low.contains("wrong password") || low.contains("data error") {
+            if low.contains("wrong password") {
                 continue;
             }
+            all_wrong_password = false;
             break;
+        }
+        if all_wrong_password && tried > 0 {
+            return Err(format!("密码不匹配：尝试了 {tried} 个密码均失败。{}", tail_line(&last_text)));
         }
         Err(format!("尝试了 {tried} 个密码均失败。{}", tail_line(&last_text)))
     }
@@ -192,17 +203,20 @@ impl Extractor {
         passwords: &[String],
     ) -> Result<Option<String>, String> {
         let arch = archive.to_string_lossy().into_owned();
-        let Some(r) = self.run_unrar(&["t".to_string(), arch.clone()]) else {
-            return Err("7z 不可用，且找不到 UnRAR.exe，请检查 config.json 中的路径".to_string());
+        let initial = if self.retry_password_only { None } else {
+            Some(self.run_unrar(&["t".to_string(), arch.clone()])
+                .ok_or_else(|| "7z 不可用，且找不到 UnRAR.exe，请检查 config.json 中的路径".to_string())?)
         };
-        if r.code == Some(0) {
+        if initial.as_ref().is_some_and(|r| r.code == Some(0)) {
             let r2 = self.run_unrar(&["x".to_string(), arch, dest.to_string_lossy().into_owned()]);
             if r2.as_ref().is_some_and(|r| r.code == Some(0)) {
                 return Ok(None); // 空密码命中
             }
             return Err("测试通过但解压失败".to_string());
         }
-        let mut last_text = r.text;
+        let mut last_text = initial.map(|r| r.text).unwrap_or_default();
+        let mut all_wrong_password = true;
+        if !last_text.is_empty() { all_wrong_password = last_text.to_lowercase().contains("wrong password"); }
         let mut seen: Vec<String> = Vec::new();
         for pw in passwords {
             if pw.is_empty() || seen.contains(pw) {
@@ -213,6 +227,7 @@ impl Extractor {
                 return Err("找不到 UnRAR.exe".to_string());
             };
             last_text = r.text.clone();
+            all_wrong_password &= last_text.to_lowercase().contains("wrong password");
             if r.code == Some(0) {
                 let r2 = self.run_unrar(&[
                     "x".to_string(),
@@ -226,7 +241,11 @@ impl Extractor {
                 return Err("测试通过但解压失败".to_string());
             }
         }
-        Err(format!("UnRAR 尝试所有密码均失败。{}", tail_line(&last_text)))
+        if all_wrong_password && (!seen.is_empty() || !last_text.is_empty()) {
+            Err(format!("密码不匹配：UnRAR 尝试所有密码均失败。{}", tail_line(&last_text)))
+        } else {
+            Err(format!("UnRAR 尝试所有密码均失败。{}", tail_line(&last_text)))
+        }
     }
 
     /// kind=rar 时优先 7z（探测 -p 防加密头卡交互），7z 不可用走 unrar 回退。
@@ -238,6 +257,13 @@ impl Extractor {
         kind: ArchiveKind,
     ) -> Result<Option<String>, String> {
         if kind == ArchiveKind::Rar {
+            if self.retry_password_only {
+                return if self.has_7z() {
+                    self.extract_with_7z(archive, dest, passwords)
+                } else {
+                    self.extract_rar_fallback(archive, dest, passwords)
+                };
+            }
             let r7 = self.run_7z(&[
                 "t".to_string(),
                 archive.to_string_lossy().into_owned(),

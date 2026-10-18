@@ -19,7 +19,7 @@ struct Args {
     /// 解压产物根目录（默认取 config.json 的 output_dir）
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// 失败包移入的目录（默认 config.json 的 failed_dir 或 <输出目录>/解压失败）
+    /// 失败包移入的目录（默认 config.json 的 failed_dir 或 <输出目录>/failed）
     #[arg(long = "failed-dir")]
     failed_dir: Option<PathBuf>,
     /// 递归扫描子目录（默认已开启，可配置）
@@ -135,6 +135,13 @@ fn run_pack_cmd(pa: PackArgs, cfg: &Config) -> ExitCode {
         volume_size_gb: pa.volume_size,
         name_start: pa.name.clone(),
         name_step: pa.step,
+        name_mode: "legacy".to_string(),
+        name_prefix: String::new(),
+        name_suffix: String::new(),
+        prefix_enabled: false,
+        suffix_enabled: false,
+        number_start: "001".to_string(),
+        auto_number: false,
         mix_txt: !pa.no_txt,
         txt_template: pa
             .txt_template
@@ -170,7 +177,11 @@ fn run_pack_cmd(pa: PackArgs, cfg: &Config) -> ExitCode {
             },
             pa.volume_threshold,
             pa.volume_size,
-            if opts.mix_txt { "，混入混淆 txt" } else { "" },
+            if opts.mix_txt {
+                "，混入混淆 txt"
+            } else {
+                ""
+            },
         );
         println!();
         let step = if pa.step == 0 { 1 } else { pa.step };
@@ -188,7 +199,10 @@ fn run_pack_cmd(pa: PackArgs, cfg: &Config) -> ExitCode {
                 src.display(),
                 unzip_core::pack::fmt_size(size),
                 if split {
-                    format!("，超过 {:.1} GB → 分卷 {:.1} GB/个", pa.volume_threshold, pa.volume_size)
+                    format!(
+                        "，超过 {:.1} GB → 分卷 {:.1} GB/个",
+                        pa.volume_threshold, pa.volume_size
+                    )
                 } else {
                     String::new()
                 },
@@ -230,8 +244,10 @@ fn run_pack_cmd(pa: PackArgs, cfg: &Config) -> ExitCode {
 }
 
 fn list_passwords(cfg: &Config) {
-    println!("密码排序规则：{}（list_order=按列表顺序；recent_first=最近成功的优先）",
-             cfg.password_strategy);
+    println!(
+        "密码排序规则：{}（list_order=按列表顺序；recent_first=最近成功的优先）",
+        cfg.password_strategy
+    );
     if cfg.passwords.is_empty() {
         println!("密码库为空，用 --add-password 密码 添加");
     }
@@ -264,8 +280,14 @@ fn main() -> ExitCode {
             println!("密码已存在：{pw}");
         } else {
             cfg.passwords.push(pw.clone());
-            println!("{}{pw}",
-                if config::save_config(&cfg) { "已添加" } else { "添加成功但写入 config.json 失败：" });
+            println!(
+                "{}{pw}",
+                if config::save_config(&cfg) {
+                    "已添加"
+                } else {
+                    "添加成功但写入 config.json 失败："
+                }
+            );
         }
         return ExitCode::SUCCESS;
     }
@@ -293,12 +315,14 @@ fn main() -> ExitCode {
         args.recursive || cfg.recursive
     };
 
-    let out_root = args.output
+    let out_root = args
+        .output
         .or_else(|| (!cfg.output_dir.is_empty()).then(|| PathBuf::from(&cfg.output_dir)))
         .unwrap_or_else(config::default_output_dir);
-    let failed_root = args.failed_dir
+    let failed_root = args
+        .failed_dir
         .or_else(|| (!cfg.failed_dir.is_empty()).then(|| PathBuf::from(&cfg.failed_dir)))
-        .unwrap_or_else(|| out_root.join("解压失败"));
+        .unwrap_or_else(|| out_root.join("failed"));
 
     // 目录目标作为分组根；文件目标按根目录散包处理（取首个文件的父目录）
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -313,14 +337,22 @@ fn main() -> ExitCode {
         }
     }
     if let Some(first) = files.first() {
-        roots.push(first.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")));
+        roots.push(
+            first
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        );
     }
 
     println!("输出目录：{}", out_root.display());
     println!("失败目录：{}", failed_root.display());
     if !cfg.passwords.is_empty() || !args.password.is_empty() {
-        println!("密码库：{} 个（规则：{}）",
-                 cfg.passwords.len() + args.password.len(), cfg.password_strategy);
+        println!(
+            "密码库：{} 个（规则：{}）",
+            cfg.passwords.len() + args.password.len(),
+            cfg.password_strategy
+        );
     }
     println!();
 
@@ -343,14 +375,22 @@ fn main() -> ExitCode {
     );
 
     println!("{}", "-".repeat(50));
-    println!("完成：成功 {}，失败 {}，跳过 {}，警告 {}",
-             summary.ok.len(), summary.failed.len(),
-             summary.skipped.len(), summary.warns.len());
+    println!(
+        "完成：成功 {}，失败 {}，跳过 {}，警告 {}",
+        summary.ok.len(),
+        summary.failed.len(),
+        summary.skipped.len(),
+        summary.warns.len()
+    );
     if !summary.failed.is_empty() {
         println!("失败明细：");
         for (name, reason) in &summary.failed {
             println!("  - {name}：{reason}");
         }
     }
-    if summary.failed.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if summary.failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

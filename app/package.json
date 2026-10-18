@@ -1,7 +1,7 @@
 {
   "name": "unzip-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.26101801",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {
