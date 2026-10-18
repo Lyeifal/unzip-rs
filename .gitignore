@@ -19,3 +19,6 @@ Thumbs.db
 # Updater signing secrets belong outside the repository.
 *.key
 *.key.password
+
+# Local-only notes and release records.
+/loaclDocs/
