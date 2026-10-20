@@ -1,10 +1,11 @@
 // Run with node app/tests/tool-path-settings.mjs. PLAYWRIGHT_MODULE may point to
 // an existing Playwright ESM installation; the test owns its Vite/browser only.
 import { createServer } from 'vite';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const modulePath = process.env.PLAYWRIGHT_MODULE;
+const { chromium } = await import(modulePath && path.isAbsolute(modulePath) ? pathToFileURL(modulePath).href : modulePath || 'playwright');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const server = await createServer({ root, configFile: path.join(root, 'vite.config.ts'), server: { host: '127.0.0.1', port: 0, strictPort: false } });
 await server.listen();

@@ -114,13 +114,17 @@ pub fn load_config() -> Config {
 
 /// 从指定路径读配置；缺文件/坏 JSON 都静默回退默认。
 pub fn load_config_from(path: &Path) -> Config {
-    let mut cfg = Config::default();
-    if let Ok(text) = std::fs::read_to_string(path) {
-        if let Ok(loaded) = serde_json::from_str::<Config>(&text) {
-            cfg = loaded;
-        }
+    load_config_from_checked(path).unwrap_or_default()
+}
+
+/// Task entry points report broken settings instead of using default passwords and paths.
+pub fn load_config_from_checked(path: &Path) -> Result<Config, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("配置文件无效（{}），请修复后重试，原文件已保留：{e}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(format!("无法读取配置文件（{}）：{error}", path.display())),
     }
-    cfg
 }
 
 /// 原子写（tmp + rename），失败返回 false。
@@ -139,7 +143,11 @@ static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// The update closure must not call another config-writing function.
 pub fn update_config_to(path: &Path, update: impl FnOnce(&mut Config)) -> bool {
     let _guard = CONFIG_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut cfg = load_config_from(path);
+    // A partial settings update must never replace unreadable user data with defaults.
+    let mut cfg = match load_config_from_checked(path) {
+        Ok(cfg) => cfg,
+        Err(_) => return false,
+    };
     update(&mut cfg);
     save_config_to_unlocked(&cfg, path)
 }
@@ -196,6 +204,21 @@ pub fn format_rule(rule: &PasswordRule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_update_preserves_invalid_or_unreadable_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let invalid = b"{invalid but recoverable passwords";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(load_config_from_checked(&path).is_err());
+        assert!(!update_config_to(&path, |cfg| cfg.shell_show_progress = false));
+        assert_eq!(std::fs::read(&path).unwrap(), invalid);
+        assert!(!path.with_extension("tmp").exists());
+        assert!(!update_config_to(temp.path(), |_| panic!("must not update unreadable data")));
+        let new_path = temp.path().join("new.json");
+        assert!(update_config_to(&new_path, |cfg| cfg.passwords.push("keep".into())));
+        assert_eq!(load_config_from(&new_path).passwords, ["keep"]);
+    }
     #[test]
     fn old_config_keeps_failed_directory_enabled_and_retry_mode_is_transient() {
         let old: Config = serde_json::from_str(r#"{"failed_dir":"C:/failed"}"#).unwrap();

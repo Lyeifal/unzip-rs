@@ -77,6 +77,8 @@ window.quickDone=async()=>{const {emit}=await import('/node_modules/@tauri-apps/
   await page.evaluate(() => shellDone());
   await page.waitForFunction(() => shellTest.accepted.length === 2);
   assert.deepEqual(await page.evaluate(() => shellTest.accepted[1]), { action: 'extract-folder', paths: ['D:/hot/new.7z'] });
+  await page.getByRole('button', { name: /打包压缩/ }).click();
+  assert.equal(await page.getByRole('button', { name: '开始打包', exact: true }).isDisabled(), true, 'active extraction must block manual packing');
   await page.evaluate(() => shellDone());
 
   // Switch away and deliver another request; KeepAlive must preserve listeners.
@@ -120,6 +122,10 @@ window.quickDone=async()=>{const {emit}=await import('/node_modules/@tauri-apps/
   await page.waitForFunction(() => shellTest.quickAccepted.length === 1);
   assert.deepEqual(await page.evaluate(() => shellTest.quickAccepted[0]), {paths:['C:/quick/资料','D:/notes.txt'],format:'7z'});
   assert.equal(await page.evaluate(() => shellTest.picks), 0);
+  assert.equal(await page.getByLabel('包名步长').isDisabled(), true, 'running pack options must be frozen');
+  await page.getByRole('button', { name: /自动解压/ }).click();
+  assert.equal(await page.getByRole('button', { name: '开始解压', exact: true }).isDisabled(), true, 'active packing must block manual extraction');
+  await page.getByRole('button', { name: /打包压缩/ }).click();
   await page.evaluate(() => emitShell([{action:'pack-same-name',paths:['C:/next']}]));
   await page.getByText(/右键快捷压缩等待中/).waitFor();
   assert.equal(await page.evaluate(() => shellTest.quickAccepted.length), 1);

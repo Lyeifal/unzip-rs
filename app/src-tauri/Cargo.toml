@@ -1,6 +1,6 @@
 [package]
 name = "unzip-app"
-version = "0.1.26101901"
+version = "0.1.26102001"
 edition = "2021"
 description = "unzip-rs archive manager (Tauri shell)"
 license = "MIT"

@@ -117,11 +117,17 @@ pub fn next_name(name: &str, step: u32) -> String {
     if start == bytes.len() {
         return format!("{name}{step}");
     }
-    let width = bytes.len() - start;
-    let num: u64 = name[start..].parse().unwrap_or(0);
-    let next = num + step as u64;
-    let natural = next.to_string().len();
-    format!("{}{:0w$}", &name[..start], next, w = width.max(natural))
+    // Decimal addition preserves arbitrary filename numbers without u64 overflow.
+    let mut digits = bytes[start..].to_vec();
+    let mut carry = step as u64;
+    for digit in digits.iter_mut().rev() {
+        let sum = (*digit - b'0') as u64 + carry;
+        *digit = b'0' + (sum % 10) as u8;
+        carry = sum / 10;
+    }
+    let digits = String::from_utf8(digits).expect("ASCII digits remain valid UTF-8");
+    if carry > 0 { format!("{}{carry}{digits}", &name[..start]) }
+    else { format!("{}{digits}", &name[..start]) }
 }
 
 /// 清洗包名中的 Windows 文件名非法字符（\ / : * ? " < > | 与控制字符 → _）。
@@ -427,17 +433,29 @@ fn dedupe_name(used: &mut Vec<String>, name: &str) -> String {
 }
 
 /// 输出撞名避让：{name}.{format} 已存在则 "{name} (2)"…（对齐 unique_dir 风格，绝不覆盖旧包）。
-fn unique_pack_name(dir: &Path, name: &str, format: &str) -> String {
-    if !dir.join(format!("{name}.{format}")).exists() {
-        return name.to_string();
+fn unique_pack_name(dir: &Path, name: &str, format: &str) -> Result<String, String> {
+    // Include every numbered volume, even when the first volume is missing.
+    let mut occupied = std::collections::HashSet::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("读取打包输出目录失败：{e}"))? {
+        let entry = entry.map_err(|e| format!("读取打包输出目录失败：{e}"))?;
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if let Some((base, number)) = name.rsplit_once('.') {
+            if is_volume_number(number) { occupied.insert(base.to_string()); }
+        }
+        occupied.insert(name);
     }
-    for i in 2..1000 {
-        let cand = format!("{name} ({i})");
-        if !dir.join(format!("{cand}.{format}")).exists() {
-            return cand;
+    for i in 1..=100_000 {
+        let candidate = if i == 1 { name.to_string() } else { format!("{name} ({i})") };
+        let archive = format!("{candidate}.{format}").to_lowercase();
+        if !occupied.contains(&archive) {
+            return Ok(candidate);
         }
     }
-    name.to_string()
+    Err("无法分配不重名的压缩包名称".into())
+}
+
+fn is_volume_number(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +471,19 @@ fn write_mix_txt(staging: &Path, template: &str) -> Result<(), String> {
         template.to_string()
     };
     let content = format!("{}\n#{}\n", body.replace("{date}", &date), random_hex(8));
-    fs::write(staging.join(MIX_TXT_NAME), content).map_err(|e| format!("写入混淆 txt 失败：{e}"))
+    // The input may itself be a hard link named 资源说明.txt. Never truncate it.
+    use std::io::Write;
+    for index in 1..=100_000 {
+        let name = if index == 1 { MIX_TXT_NAME.to_string() } else { format!("资源说明 ({index}).txt") };
+        let target = staging.join(name);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(mut file) => return file.write_all(content.as_bytes()).map_err(|e| format!("写入混淆 txt 失败：{e}")),
+            // Windows reports AccessDenied when create_new encounters a directory.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists || target.symlink_metadata().is_ok() => continue,
+            Err(error) => return Err(format!("写入混淆 txt 失败：{error}")),
+        }
+    }
+    Err("无法分配不重名的资源说明文件".into())
 }
 
 /// 当前日期 YYYY-MM-DD。主目标平台是 Windows，直接取本地时间；
@@ -527,9 +557,10 @@ fn stage_input(staging: &Path, source: &Path) -> Result<u64, String> {
     let dst = staging.join(&dst_name);
     let mut count = 0u64;
     if source.is_file() {
-        crate::extract::link_or_copy(source, &dst);
+        stage_file(source, &dst)?;
         return Ok(1);
     }
+    if !source.is_dir() { return Err(format!("源文件或目录已不存在：{}", source.display())); }
     fs::create_dir_all(&dst).map_err(|e| format!("创建暂存目录失败：{e}"))?;
     for entry in WalkDir::new(source).min_depth(1) {
         let entry = entry.map_err(|e| format!("遍历源目录失败：{e}"))?;
@@ -544,11 +575,25 @@ fn stage_input(staging: &Path, source: &Path) -> Result<u64, String> {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("创建暂存目录失败：{e}"))?;
             }
-            crate::extract::link_or_copy(entry.path(), &target);
+            stage_file(entry.path(), &target)?;
             count += 1;
         }
     }
     Ok(count)
+}
+
+fn stage_file(source: &Path, target: &Path) -> Result<(), String> {
+    if fs::hard_link(source, target).is_ok() { return Ok(()); }
+    // create_new also prevents accidentally writing through a staged hard link.
+    let copy = || -> std::io::Result<()> {
+        let mut input = fs::File::open(source)?;
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
+        let result = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+        drop(output);
+        if result.is_err() { let _ = fs::remove_file(target); }
+        result
+    };
+    copy().map_err(|e| format!("暂存文件 {} 失败：{e}", source.display()))
 }
 
 /// 收集产物：单卷 {name}.{format}；分卷 {name}.{format}.001/.002…（按名排序）。
@@ -563,14 +608,17 @@ fn collect_outputs(dir: &Path, name: &str, format: &str) -> Vec<PathBuf> {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
+                if !p.is_file() { return false; }
                 p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with(&prefix))
+                    .map(|n| n.to_string_lossy().strip_prefix(&prefix).is_some_and(is_volume_number))
                     .unwrap_or(false)
             })
             .collect(),
         Err(_) => Vec::new(),
     };
-    vols.sort();
+    // Numeric order remains correct beyond .999 (7-Zip then emits .1000).
+    vols.sort_by_key(|path| path.extension().and_then(|ext| ext.to_str())
+        .and_then(|ext| ext.parse::<u64>().ok()).unwrap_or(u64::MAX));
     vols
 }
 
@@ -578,6 +626,7 @@ fn collect_outputs(dir: &Path, name: &str, format: &str) -> Vec<PathBuf> {
 fn pack_one(
     source: &Path,
     name: &str,
+    size: u64,
     opts: &PackOptions,
     password: Option<&str>,
     ex: &Extractor,
@@ -587,9 +636,8 @@ fn pack_one(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| source.display().to_string());
-    let size = content_size(source);
     let out_dir = PathBuf::from(&opts.output_dir);
-    let final_name = unique_pack_name(&out_dir, name, &opts.format);
+    let final_name = unique_pack_name(&out_dir, name, &opts.format)?;
     if final_name != name {
         let w = format!(
             "{name}.{fmt} 已存在，改用 {final_name}.{fmt}",
@@ -607,12 +655,16 @@ fn pack_one(
         write_mix_txt(staging.path(), &opts.txt_template)?;
     }
 
-    let archive = out_dir.join(format!("{final_name}.{}", opts.format));
+    // Compress privately first: a tool error must not leave an apparently finished archive.
+    let compressed = tempfile::Builder::new().prefix(".unzip-pack-output-")
+        .tempdir_in(&out_dir).map_err(|e| format!("创建压缩产物暂存目录失败：{e}"))?;
+    let archive = compressed.path().join(format!("{final_name}.{}", opts.format));
     let args = build_7z_args(&archive, size, opts, password);
     let Some(r) = ex.run_7z_in(staging.path(), &args) else {
         return Err("找不到 7z.exe，请检查 config.json 中的 seven_zip 路径".to_string());
     };
-    if !(r.code.is_some_and(|c| c <= 1)) {
+    // Code 1 means files were skipped or could not be read; this is not a complete backup.
+    if r.code != Some(0) {
         let tail = r
             .text
             .trim()
@@ -625,7 +677,7 @@ fn pack_one(
         return Err(format!("7z 打包失败：{tail}"));
     }
 
-    let mut outputs = collect_outputs(&out_dir, &final_name, &opts.format);
+    let mut outputs = collect_outputs(compressed.path(), &final_name, &opts.format);
     if outputs.is_empty() {
         return Err("打包未产出任何文件".to_string());
     }
@@ -637,7 +689,7 @@ fn pack_one(
             // 检查是否为 {name}.{format}.001 形态
             let expected_vol = format!("{}.{}.001", final_name, opts.format);
             if fname == expected_vol {
-                let target = out_dir.join(format!("{}.{}", final_name, opts.format));
+                let target = compressed.path().join(format!("{}.{}", final_name, opts.format));
                 match fs::rename(single, &target) {
                     Ok(_) => {
                         outputs[0] = target;
@@ -653,6 +705,18 @@ fn pack_one(
             }
         }
     }
+
+    let mut published = Vec::new();
+    for output in &outputs {
+        let target = out_dir.join(output.file_name().ok_or("压缩产物缺少文件名")?);
+        if let Err(error) = stage_file(output, &target) {
+            // Only paths successfully created by this attempt may be rolled back.
+            for path in &published { let _ = fs::remove_file(path); }
+            return Err(format!("发布压缩产物失败：{error}"));
+        }
+        published.push(target);
+    }
+    let outputs = published;
 
     let mut output_hashes = Vec::new();
     for output in &outputs {
@@ -749,6 +813,13 @@ pub fn run_pack(
         summary
             .failed
             .push(("（全部）".to_string(), "打包输出目录无效".to_string()));
+        return summary;
+    }
+    if !opts.volume_threshold_gb.is_finite() || opts.volume_threshold_gb < 0.0
+        || !opts.volume_size_gb.is_finite() || opts.volume_size_gb <= 0.0 {
+        let reason = "分卷阈值必须为非负数，分卷大小必须为正数".to_string();
+        log(&format!("[错误] {reason}"), LogLevel::Error);
+        summary.failed.push(("（全部）".into(), reason));
         return summary;
     }
     let out_abs = abs_path(Path::new(out_dir));
@@ -853,6 +924,7 @@ pub fn run_pack(
             _ => Some(gen_password()),
         };
 
+        cb.on_progress(i, sources.len(), &name);
         let size = content_size(src);
         log(
             &format!("[打包] {name} ← {}（{}）", src.display(), fmt_size(size)),
@@ -872,7 +944,7 @@ pub fn run_pack(
             log("[打包] 混入资源说明.txt（混淆 hash）", LogLevel::Skip);
         }
 
-        match pack_one(src, &name, &opts_eff, pw.as_deref(), &ex, cb) {
+        match pack_one(src, &name, size, &opts_eff, pw.as_deref(), &ex, cb) {
             Ok(res) => {
                 if res.output_hashes.len() != res.outputs.len() {
                     summary.warns.push(format!(
@@ -1054,6 +1126,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_text_never_modifies_a_same_named_source_file_or_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join(MIX_TXT_NAME);
+        fs::write(&source, b"original user content").unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        stage_input(staging.path(), &source).unwrap();
+        write_mix_txt(staging.path(), "generated description").unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"original user content");
+        assert_eq!(fs::read(staging.path().join(MIX_TXT_NAME)).unwrap(), b"original user content");
+        assert!(fs::read_to_string(staging.path().join("资源说明 (2).txt")).unwrap().starts_with("generated description"));
+        let directory_stage = tempfile::tempdir().unwrap();
+        fs::create_dir(directory_stage.path().join(MIX_TXT_NAME)).unwrap();
+        write_mix_txt(directory_stage.path(), "description").unwrap();
+        assert!(directory_stage.path().join(MIX_TXT_NAME).is_dir());
+        assert!(directory_stage.path().join("资源说明 (2).txt").is_file());
+    }
+
+    #[test]
+    fn staging_errors_are_reported_without_replacing_existing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("input.txt");
+        fs::write(&source, b"source").unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let target = staging.path().join("input.txt");
+        fs::write(&target, b"keep existing").unwrap();
+        assert!(stage_input(staging.path(), &source).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep existing");
+        assert!(stage_input(staging.path(), &temp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn output_names_avoid_existing_volumes_and_collection_is_numeric() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        for name in ["G001.7z.002", "G001 (2).7z", "G001 (3).7z.1000"] {
+            fs::write(dir.join(name), b"existing").unwrap();
+        }
+        assert_eq!(unique_pack_name(dir, "G001", "7z").unwrap(), "G001 (4)");
+        for name in ["new.7z.001", "new.7z.999", "new.7z.1000", "new.7z.bak"] {
+            fs::write(dir.join(name), b"volume").unwrap();
+        }
+        fs::create_dir(dir.join("new.7z.005")).unwrap();
+        let outputs = collect_outputs(dir, "new", "7z");
+        assert_eq!(outputs, [dir.join("new.7z.001"), dir.join("new.7z.999"), dir.join("new.7z.1000")]);
+    }
+
+    #[test]
+    fn real_pack_keeps_source_description_and_old_volume_intact() {
+        let seven_zip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/bundled/7z.exe");
+        if !seven_zip.is_file() { return; }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join(MIX_TXT_NAME);
+        fs::write(&source, b"original description").unwrap();
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let old_volume = out.join("G001.7z.002");
+        fs::write(&old_volume, b"old volume").unwrap();
+        let cfg = Config { seven_zip: seven_zip.to_string_lossy().into_owned(), ..Default::default() };
+        let opts = PackOptions { output_dir: out.to_string_lossy().into_owned(), mix_txt: true, ..Default::default() };
+        let ex = Extractor::new(&cfg, None);
+        let result = pack_one(&source, "G001", content_size(&source), &opts, None, &ex, &crate::types::NullCallback).unwrap();
+        assert_eq!(result.name, "G001 (2)");
+        assert_eq!(fs::read(&source).unwrap(), b"original description");
+        assert_eq!(fs::read(&old_volume).unwrap(), b"old volume");
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 2, "private staging must be cleaned");
+        let extracted = temp.path().join("verify");
+        ex.extract_with_7z(&result.outputs[0], &extracted, &[]).unwrap();
+        assert_eq!(fs::read(extracted.join(MIX_TXT_NAME)).unwrap(), b"original description");
+        assert!(extracted.join("资源说明 (2).txt").is_file());
+        assert_eq!(result.output_hashes.len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_source_cannot_produce_success_or_leave_partial_outputs() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let seven_zip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/bundled/7z.exe");
+        if !seven_zip.is_file() { return; }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("locked.txt");
+        fs::write(&source, b"locked content").unwrap();
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let locked = fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+        let cfg = Config { seven_zip: seven_zip.to_string_lossy().into_owned(), ..Default::default() };
+        let opts = PackOptions { output_dir: out.to_string_lossy().into_owned(), mix_txt: false, ..Default::default() };
+        let ex = Extractor::new(&cfg, None);
+        assert!(pack_one(&source, "G001", 14, &opts, None, &ex, &crate::types::NullCallback).is_err());
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+        drop(locked);
+        assert_eq!(fs::read(source).unwrap(), b"locked content");
+    }
+
+    #[test]
     fn next_name_basic() {
         assert_eq!(next_name("G198", 1), "G199");
         assert_eq!(next_name("H113", 1), "H114");
@@ -1066,6 +1232,8 @@ mod tests {
         assert_eq!(next_name("G001", 1), "G002");
         assert_eq!(next_name("G009", 1), "G010");
         assert_eq!(next_name("Z999", 1), "Z1000"); // 溢出变宽，不截断
+        assert_eq!(next_name("G18446744073709551615", 1), "G18446744073709551616");
+        assert_eq!(next_name("G999999999999999999999999", 2), "G1000000000000000000000001");
     }
 
     #[test]

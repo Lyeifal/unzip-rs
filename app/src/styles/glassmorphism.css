@@ -128,6 +128,7 @@ button {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 summary:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
@@ -394,7 +395,7 @@ select:focus {
   position: absolute;
   top: calc(100% + 5px);
   left: 0;
-  z-index: 120;
+  z-index: 1100;
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -424,6 +425,7 @@ select:focus {
   font: inherit;
   font-size: 13px;
   text-align: left;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
@@ -747,6 +749,7 @@ input[type="checkbox"]:focus-visible {
   margin-top: 8px;
   border-collapse: collapse;
   font-size: 12px;
+  table-layout: fixed;
 }
 
 .result-table th,
@@ -754,6 +757,7 @@ input[type="checkbox"]:focus-visible {
   padding: 7px 9px;
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .result-table th {

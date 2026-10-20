@@ -7,6 +7,7 @@ import TaskActivity from './TaskActivity.vue';
 import type { SelectOption } from "../types/select";
 import { useShellQueue, appendUniquePaths } from '../composables/useShellQueue';
 import { waitForToolPathsSave } from '../composables/useToolPaths';
+import { useTaskLog } from '../composables/useTaskLog';
 import {
   defaultConfig,
   formatRule,
@@ -14,16 +15,15 @@ import {
   type SummaryPayload,
 } from "../types";
 
-const LEVELS = ["ok", "error", "warn", "skip", "info"] as const;
-const { unpackPaths: selectedPaths, directRequests, directActive } = useShellQueue();
+const { unpackPaths: selectedPaths, directRequests, directActive, quickActive } = useShellQueue();
 const shellReady = ref(false);
 let shellTimer: ReturnType<typeof setTimeout> | undefined;
 function scheduleShellRun() {
-  if (!shellReady.value || running.value || starting.value || !directRequests.value.length || shellTimer) return;
+  if (!shellReady.value || running.value || starting.value || quickActive.value || !directRequests.value.length || shellTimer) return;
   shellTimer = setTimeout(() => { shellTimer = undefined; void startShellRequest(); }, 300);
 }
 async function startShellRequest() {
-  if (!shellReady.value || running.value || starting.value) return;
+  if (!shellReady.value || running.value || starting.value || quickActive.value) return;
   const request = directRequests.value.shift();
   if (!request) return;
   starting.value = true;
@@ -100,8 +100,7 @@ const ruleKindOptions: SelectOption[] = [
 const cfg = reactive<Config>(defaultConfig());
 const running = ref(false);
 const starting = ref(false);
-const logs = ref<{ msg: string; level: string }[]>([]);
-const logBox = ref<HTMLElement | null>(null);
+const { logs, logBox, appendLog } = useTaskLog();
 const done = ref(0);
 const total = ref(0);
 const current = ref("");
@@ -165,16 +164,6 @@ const rulePws = ref("");
 const ruleErr = ref("");
 
 let unlisteners: UnlistenFn[] = [];
-
-// ---------- 日志 ----------
-
-function appendLog(msg: string, level: string = "info") {
-  logs.value.push({ msg, level: LEVELS.includes(level as (typeof LEVELS)[number]) ? level : "info" });
-  nextTick(() => {
-    const el = logBox.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-}
 
 // ---------- 目录/文件选择 ----------
 
@@ -302,7 +291,7 @@ function ruleMove(delta: number) {
 // ---------- 运行控制 ----------
 
 async function start() {
-  if (running.value || starting.value) return;
+  if (running.value || starting.value || quickActive.value) return;
   const src = cfg.source_dir.trim();
   if ((sourceMode.value === 'directory' || sourceMode.value === 'both') && !src) {
     appendLog("[警告] 请先选择有效的压缩包所在目录", "warn");
@@ -376,7 +365,7 @@ function openRetry(slot: number) {
 }
 
 async function submitRetry() {
-  if (retrySlot.value === null || running.value) return;
+  if (retrySlot.value === null || running.value || starting.value || quickActive.value) return;
   if (!retryPassword.value) { retryError.value = '请输入新密码'; return; }
   try {
     running.value = true;
@@ -420,6 +409,7 @@ function onRetryDone(payload: { slot: number; failedIndex: number; result: Summa
 
 // ---------- 生命周期 ----------
 watch(() => directRequests.value.map(request => `${request.action}:${request.paths.length}`).join('|'), scheduleShellRun);
+watch(quickActive, scheduleShellRun);
 watch(() => running.value || starting.value, (active) => { directActive.value = active; scheduleShellRun(); }, { flush: 'sync' });
 
 onMounted(async () => {
@@ -461,6 +451,7 @@ onUnmounted(() => {
     <h1 class="title">自动解压</h1>
     <TaskActivity :running="running" :current="current" :done="done" :total="total" kind="解压" />
     <p v-if="directRequests.length" class="selection-hint" role="status">右键解压等待中（{{ directRequests.length }} 批），当前任务结束后自动开始，使用已保存的解压和密码设置。</p>
+    <p v-if="quickActive" class="selection-hint" role="status">打包任务进行中，完成后可开始解压。</p>
     <section class="glass-card section-card">
       <div class="section-title">解压来源</div>
       <div class="source-modes" role="radiogroup" aria-label="解压来源方式">
@@ -501,7 +492,7 @@ onUnmounted(() => {
 
     <!-- 运行 -->
     <div class="row run-row">
-      <button class="btn-glass btn-primary" :disabled="running || starting" @click="start">开始解压</button>
+      <button class="btn-glass btn-primary" :disabled="running || starting || quickActive" @click="start">开始解压</button>
       <button class="btn-glass btn-danger" :disabled="!running" @click="stop">停止</button>
       <span class="current">{{ current }}</span>
     </div>
@@ -527,7 +518,7 @@ onUnmounted(() => {
           </div>
           <div v-for="([name, reason], i) in summary.failed" :key="'f' + i" class="sum-line lv-error">
             失败：{{ name }} — {{ reason }}
-            <button v-if="summary.retryable?.some(item => item.failed_index === i)" class="btn-glass retry-btn" :disabled="running" @click="openRetry(summary.retryable.find(item => item.failed_index === i)!.slot)">添加新密码并重试</button>
+            <button v-if="summary.retryable?.some(item => item.failed_index === i)" class="btn-glass retry-btn" :disabled="running || starting || quickActive" @click="openRetry(summary.retryable.find(item => item.failed_index === i)!.slot)">添加新密码并重试</button>
           </div>
           <div v-for="(w, i) in summary.warns" :key="'w' + i" class="sum-line lv-warn">
             警告：{{ w }}
@@ -543,7 +534,7 @@ onUnmounted(() => {
         <p class="selection-hint">本次只对这个密码不匹配的压缩包尝试新密码；成功后加入密码库。</p>
         <input v-model="retryPassword" class="input-glass" type="text" aria-label="新密码" autofocus @keyup.enter="submitRetry" />
         <div v-if="retryError" class="dlg-err" role="alert">{{ retryError }}</div>
-        <div class="row dlg-btns"><button class="btn-glass btn-primary" :disabled="running" @click="submitRetry">重试</button><button class="btn-glass" @click="retrySlot = null">取消</button></div>
+        <div class="row dlg-btns"><button class="btn-glass btn-primary" :disabled="running || starting || quickActive" @click="submitRetry">重试</button><button class="btn-glass" @click="retrySlot = null">取消</button></div>
       </div>
     </div>
 

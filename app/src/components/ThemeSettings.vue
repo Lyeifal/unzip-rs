@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useTheme, type ManualThemeColors } from "../composables/useTheme";
 import { THEME_PRESETS, type ThemePresetId } from "../utils/themePresets";
 import LibraryFieldsSettings from './LibraryFieldsSettings.vue';
@@ -10,6 +10,37 @@ import UpdateSettings from './UpdateSettings.vue';
 const emit = defineEmits<{
   close: [];
 }>();
+const props = defineProps<{ initialSection?: string }>();
+const panel = ref<HTMLElement | null>(null);
+const previousFocus = document.activeElement as HTMLElement | null;
+const previousOverflow = document.body.style.overflow;
+function handleDialogKey(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    emit('close');
+  } else if (event.key === 'Tab') {
+    const focusable = [...(panel.value?.querySelectorAll<HTMLElement>('button, input, select, textarea, [tabindex]') ?? [])]
+      .filter(element => !element.matches(':disabled, [tabindex="-1"]') && element.getClientRects().length > 0);
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !panel.value?.contains(document.activeElement))) {
+      event.preventDefault(); last?.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !panel.value?.contains(document.activeElement))) {
+      event.preventDefault(); first?.focus();
+    }
+  }
+}
+onMounted(() => {
+  document.body.style.overflow = 'hidden';
+  panel.value?.querySelector<HTMLButtonElement>('.close-btn')?.focus({ preventScroll: true });
+  if (props.initialSection) goToSection(props.initialSection, 'instant');
+  document.addEventListener('keydown', handleDialogKey);
+});
+onUnmounted(() => {
+  document.body.style.overflow = previousOverflow;
+  document.removeEventListener('keydown', handleDialogKey);
+  previousFocus?.focus({ preventScroll: true });
+});
 
 const theme = useTheme();
 const activeSection = ref('updates');
@@ -25,9 +56,9 @@ const settingSections = [
   { id: 'appearance', label: '界面外观' },
   { id: 'advanced', label: '高级选项' },
 ];
-function goToSection(id: string) {
+function goToSection(id: string, behavior: ScrollBehavior = 'smooth') {
   activeSection.value = id;
-  document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior, block: 'start' });
 }
 
 // 文件上传
@@ -146,16 +177,16 @@ const paletteColors = computed(() => {
 
 <template>
   <div class="settings-overlay" @click="emit('close')">
-    <div class="settings-panel glass-card" @click.stop>
+    <div ref="panel" class="settings-panel glass-card" role="dialog" aria-modal="true" aria-labelledby="settings-title" @click.stop>
       <!-- 标题栏 -->
       <div class="panel-header">
-        <h2 class="panel-title">⚙️ 应用设置</h2>
-        <button class="close-btn" @click="emit('close')">✕</button>
+        <h2 id="settings-title" class="panel-title">⚙️ 应用设置</h2>
+        <button class="close-btn" aria-label="关闭应用设置" @click="emit('close')">✕</button>
       </div>
 
       <div class="settings-body">
         <nav class="settings-sidebar" aria-label="设置导航">
-          <button v-for="item in settingSections" v-show="theme.config.value.enabled || (item.id !== 'automatic' && item.id !== 'advanced')" :key="item.id" type="button" class="sidebar-link" :class="{ active: activeSection === item.id }" @click="goToSection(item.id)">{{ item.label }}</button>
+          <button v-for="item in settingSections" v-show="theme.config.value.enabled || (item.id !== 'automatic' && item.id !== 'advanced')" :key="item.id" type="button" class="sidebar-link" :class="{ active: activeSection === item.id }" :aria-current="activeSection === item.id ? 'location' : undefined" @click="goToSection(item.id)">{{ item.label }}</button>
         </nav>
       <div class="panel-content">
         <div id="settings-updates" class="section"><UpdateSettings /></div>

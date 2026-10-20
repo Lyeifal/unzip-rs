@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
-use unzip_core::config::{load_config_from, Config};
+use unzip_core::config::{load_config_from, load_config_from_checked, Config};
 use unzip_core::pack::{run_pack, PackOptions, PackSummary};
 use unzip_core::types::{LogLevel, RetryableFailure, RunCallback, Summary};
 use unzip_core::pipeline::{run_with_layout, retry_with_layout, OutputLayout};
@@ -43,6 +43,34 @@ impl Drop for BusyGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+fn worker_failure() -> Value {
+    json!({
+        "ok": [], "failed": [["后台任务", "处理线程异常退出，请检查输出目录、失败目录和原文件后重试"]],
+        "skipped": [], "warns": [], "retryable": []
+    })
+}
+
+fn complete_archive_work(guard: BusyGuard, failure: Value, work: impl FnOnce() -> Value) -> Value {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(failure);
+    drop(guard);
+    payload
+}
+
+/// Always notify the UI, including a worker panic. Release the slot before sending completion.
+fn spawn_archive_task(
+    app: AppHandle,
+    busy: Arc<AtomicBool>,
+    event: &'static str,
+    failure: Value,
+    work: impl FnOnce() -> Value + Send + 'static,
+) -> Result<(), String> {
+    let guard = BusyGuard(busy);
+    std::thread::Builder::new().name(event.into()).spawn(move || {
+        let payload = complete_archive_work(guard, failure, work);
+        let _ = app.emit(event, payload);
+    }).map(|_| ()).map_err(|error| format!("无法启动处理线程：{error}"))
 }
 
 /// 把 core 的日志/进度/取消桥接成 Tauri 事件。
@@ -106,8 +134,8 @@ fn pack_summary_payload(s: &PackSummary) -> Value {
 }
 
 #[tauri::command]
-fn load_config(state: State<'_, AppState>) -> Config {
-    load_config_from(&state.config_path)
+fn load_config(state: State<'_, AppState>) -> Result<Config, String> {
+    load_config_from_checked(&state.config_path)
 }
 
 #[tauri::command]
@@ -262,7 +290,7 @@ fn start_run(
     if output_dir.trim().is_empty() {
         return Err("请先选择解压输出目录".to_string());
     }
-    let cfg = load_config_from(&state.config_path);
+    let cfg = load_config_from_checked(&state.config_path)?;
     let accepted = launch_unpack(app, &state, sources, PathBuf::from(output_dir.trim()), failed_dir, cfg, OutputLayout::Grouped)?;
     if !accepted { return Err("已有压缩、解压或更新任务正在进行中".into()); }
     Ok(())
@@ -280,7 +308,7 @@ fn start_shell_run(
     let sources = collect_unpack_sources("", Some(paths), Some("selected"))?;
     let out = if sources[0].is_dir() { sources[0].clone() }
         else { sources[0].parent().ok_or("无法确定压缩包所在目录")?.to_path_buf() };
-    let cfg = load_config_from(&state.config_path);
+    let cfg = load_config_from_checked(&state.config_path)?;
     let failed_dir = cfg.failed_dir.clone();
     launch_unpack(app, &state, sources, out, failed_dir, cfg, layout)
 }
@@ -309,8 +337,7 @@ fn launch_unpack(
         return Err("重试状态不可用".into());
     }
     cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let _guard = BusyGuard(busy);
+    spawn_archive_task(app.clone(), busy, "uz-done", worker_failure(), move || {
         let recursive = cfg.recursive;
         let passwords = cfg.passwords.clone();
         let cb = TauriCallback {
@@ -336,8 +363,8 @@ fn launch_unpack(
                 output_root: if layout == OutputLayout::Grouped { out.clone() } else { r.source_parent.clone() }, layout,
             })).collect();
         }
-        let _ = app.emit("uz-done", summary_payload(&summary));
-    });
+        summary_payload(&summary)
+    })?;
     Ok(true)
 }
 
@@ -351,6 +378,7 @@ fn retry_unpack_password(
 ) -> Result<(), String> {
     if password.is_empty() { return Err("请输入新密码".into()); }
     let _ = output_dir; // Retry uses the original job's output and layout, including Explorer jobs.
+    let mut cfg = load_config_from_checked(&state.config_path)?;
     if state.busy.swap(true, Ordering::SeqCst) {
         return Err("已有解压任务正在进行中".into());
     }
@@ -366,7 +394,6 @@ fn retry_unpack_password(
         state.busy.store(false, Ordering::SeqCst);
         return Err("失败压缩包已移动或删除，请重新扫描".into());
     }
-    let mut cfg = load_config_from(&state.config_path);
     cfg.retry_password_only = true;
     cfg.hash_match = false;
     cfg.passwords.clear();
@@ -376,8 +403,8 @@ fn retry_unpack_password(
     let cancel = state.cancel.clone();
     let pending = state.retryable.clone();
     cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let _guard = BusyGuard(busy);
+    spawn_archive_task(app.clone(), busy, "uz-retry-done",
+        json!({"slot": slot, "failedIndex": failed_index, "result": worker_failure()}), move || {
         let cb = TauriCallback { app: app.clone(), cancel, event_prefix: "uz" };
         let mut summary = retry_with_layout(&paths, &out, cfg, vec![password.clone()], &cb, layout);
         if let Ok(mut entries) = pending.lock() {
@@ -399,8 +426,8 @@ fn retry_unpack_password(
                 }
             }
         }
-        let _ = app.emit("uz-retry-done", json!({ "slot": slot, "failedIndex": failed_index, "result": summary_payload(&summary) }));
-    });
+        json!({ "slot": slot, "failedIndex": failed_index, "result": summary_payload(&summary) })
+    })?;
     Ok(())
 }
 
@@ -455,36 +482,24 @@ fn start_pack(
     if out.is_empty() || !Path::new(out).is_dir() {
         return Err("请先选择有效的打包输出目录".to_string());
     }
+    let sources = collect_unpack_sources("", Some(files), Some("selected"))?;
+    let cfg = load_config_from_checked(&state.config_path)?;
     if state.busy.swap(true, Ordering::SeqCst) {
         return Err("已有任务正在进行中".to_string());
-    }
-
-    let cfg = load_config_from(&state.config_path);
-    let mut sources: Vec<PathBuf> = Vec::new();
-    for f in &files {
-        let p = PathBuf::from(f);
-        if p.exists() {
-            sources.push(p);
-        }
-    }
-    if sources.is_empty() {
-        state.busy.store(false, Ordering::SeqCst);
-        return Err("待打包的文件或目录均不存在".to_string());
     }
 
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
     cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let _guard = BusyGuard(busy);
+    spawn_archive_task(app.clone(), busy, "pack-done", worker_failure(), move || {
         let cb = TauriCallback {
             app: app.clone(),
             cancel,
             event_prefix: "pack",
         };
         let summary = run_pack(&sources, &options, &cfg, &cb);
-        let _ = app.emit("pack-done", pack_summary_payload(&summary));
-    });
+        pack_summary_payload(&summary)
+    })?;
     Ok(())
 }
 
@@ -536,19 +551,18 @@ fn set_shell_display(state: State<'_, AppState>, show_progress: bool, show_conso
 #[tauri::command]
 fn start_shell_pack(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<bool, String> {
     let sources = collect_unpack_sources("", Some(paths), Some("selected"))?;
-    let cfg = load_config_from(&state.config_path);
+    let cfg = load_config_from_checked(&state.config_path)?;
     let format = if cfg.quick_pack_format == "zip" { "zip" } else { "7z" };
     if state.busy.swap(true, Ordering::SeqCst) { return Ok(false); }
     let busy = state.busy.clone();
     let cancel = state.cancel.clone();
     cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let _guard = BusyGuard(busy);
+    spawn_archive_task(app.clone(), busy, "pack-done", worker_failure(), move || {
         let cb = TauriCallback { app: app.clone(), cancel, event_prefix: "pack" };
         let summary = unzip_core::pack::run_quick_pack(&sources, format, &cfg, &cb);
         task_console::log(&format!("[完成] 压缩成功 {}，失败 {}，警告 {}", summary.ok.len(), summary.failed.len(), summary.warns.len()));
-        let _ = app.emit("pack-done", pack_summary_payload(&summary));
-    });
+        pack_summary_payload(&summary)
+    })?;
     Ok(true)
 }
 
@@ -719,6 +733,22 @@ fn main() {
 #[cfg(test)]
 mod unpack_sources_tests {
     use super::collect_unpack_sources;
+
+    #[test]
+    fn worker_completion_and_panic_release_busy_before_returning_ui_payload() {
+        use super::*;
+        let busy = Arc::new(AtomicBool::new(true));
+        let result = complete_archive_work(BusyGuard(busy.clone()), worker_failure(), || {
+            assert!(busy.load(Ordering::SeqCst));
+            json!({"ok": ["completed"]})
+        });
+        assert_eq!(result["ok"][0], "completed");
+        assert!(!busy.load(Ordering::SeqCst));
+        busy.store(true, Ordering::SeqCst);
+        let result = complete_archive_work(BusyGuard(busy.clone()), worker_failure(), || panic!("test worker panic"));
+        assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+        assert!(!busy.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn shell_display_defaults_persist_without_stale_unpack_overwrite() {

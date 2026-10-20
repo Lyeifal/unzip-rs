@@ -96,10 +96,11 @@ export interface PackOptions {
 
 export function defaultPackOptions(): PackOptions {
   // 尝试从 localStorage 加载上次的配置
-  const saved = localStorage.getItem("pack_options");
-  if (saved) {
-    try {
+  try {
+    const saved = localStorage.getItem("pack_options");
+    if (saved) {
       const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('打包配置格式无效');
       const oldName = typeof parsed.name_start === 'string' ? parsed.name_start.trim() : 'G001';
       const oldParts = /^(.*?)(\d+)$/.exec(oldName);
       const legacy = parsed.name_mode === 'legacy' || (!parsed.name_mode && typeof parsed.name_start === 'string');
@@ -125,10 +126,8 @@ export function defaultPackOptions(): PackOptions {
         compression_level: parsed.compression_level ?? 5,
         output_dir: parsed.output_dir || "",
       };
-    } catch {
-      // 解析失败，返回默认值
     }
-  }
+  } catch { /* 存储不可用或解析失败时使用默认配置 */ }
 
   return {
     format: "7z",

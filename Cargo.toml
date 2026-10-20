@@ -3,7 +3,7 @@ members = ["crates/unzip-core", "crates/unzip-cli", "crates/unzip-mcp"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.26101901"
+version = "0.1.26102001"
 edition = "2021"
 license = "MIT"
 

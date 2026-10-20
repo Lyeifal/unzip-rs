@@ -264,7 +264,13 @@ fn list_passwords(cfg: &Config) {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let mut cfg = config::load_config();
+    let mut cfg = match config::load_config_from_checked(&config::config_path()) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("[错误] {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     if let Some(Commands::Pack(pa)) = args.command {
         return run_pack_cmd(pa, &cfg);

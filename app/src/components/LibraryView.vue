@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import GameCard from './GameCard.vue';
 import StyledSelect from './StyledSelect.vue';
@@ -11,6 +11,11 @@ const storagePath = ref('');
 const mappings = ref<GameMapping[]>([]);
 const loading = ref(false), error = ref(''), searchQuery = ref('');
 const saving = ref(0);
+const saveError = ref('');
+const failedWrites = new Map<string, GameMetadata>();
+const pendingMetadata = new Map<string, GameMetadata>();
+let refreshPending = false;
+let active = false;
 const notice = ref('');
 const migrationWarning = ref('');
 const filterValues = ref<Record<string, string>>({});
@@ -63,7 +68,7 @@ async function loadPage(resetPage = false) {
     globalStats.value = result.stats;
     availableOptions.value = result.filter_options ?? {};
     page.value = result.page;
-    mappings.value = result.items.map(m => ({ ...m, metadata: library.normalizeMetadata(m.metadata) }));
+    mappings.value = result.items.map(m => ({ ...m, metadata: pendingMetadata.get(m.record_id ?? '') ?? library.normalizeMetadata(m.metadata) }));
   } catch(e) {
     if (token === loadToken) error.value = '加载失败：' + e;
   } finally { if (token === loadToken) loading.value = false; }
@@ -75,12 +80,34 @@ function updateMetadata(id: string | undefined, metadata: GameMetadata) {
   if (index < 0) return;
   mappings.value[index] = { ...mappings.value[index], metadata };
   const snapshot = JSON.parse(JSON.stringify(metadata)) as GameMetadata;
+  queueMetadataWrite(id, snapshot);
+}
+function refreshAfterEditing() {
+  if (!active || !refreshPending || saving.value || failedWrites.size) return;
+  // A save completion must not replace the next field while the user is typing.
+  if (document.activeElement?.closest('.metadata-editor')) return;
+  refreshPending = false;
+  void loadPage();
+}
+function onEditorFocusOut() { void nextTick(refreshAfterEditing); }
+function queueMetadataWrite(id: string, snapshot: GameMetadata) {
+  pendingMetadata.set(id, snapshot);
   saving.value++;
   writeQueue = writeQueue.then(async () => {
-    try { await invoke('update_archive_metadata', { recordId: id, metadata: snapshot }); error.value = ''; }
-    catch(e) { error.value = '保存失败：' + e; }
-    finally { saving.value--; queueMicrotask(() => void loadPage()); }
+    try {
+      await invoke('update_archive_metadata', { recordId: id, metadata: snapshot });
+      failedWrites.delete(id);
+      if (pendingMetadata.get(id) === snapshot) pendingMetadata.delete(id);
+      if (!failedWrites.size) saveError.value = '';
+      refreshPending = true;
+    } catch(e) {
+      failedWrites.set(id, snapshot);
+      saveError.value = '保存失败，编辑内容已保留在当前会话中：' + e;
+    } finally { saving.value--; queueMicrotask(refreshAfterEditing); }
   });
+}
+function retryFailedWrites() {
+  for (const [id, snapshot] of failedWrites) queueMetadataWrite(id, snapshot);
 }
 async function importLegacy() {
   loading.value = true; error.value = ''; notice.value = '';
@@ -95,6 +122,7 @@ async function exportBackup() {
   loading.value = true; error.value = ''; notice.value = '';
   try {
     await writeQueue;
+    if (failedWrites.size) throw new Error('请先重试保存未完成的编辑，再导出备份');
     const path = await invoke<string | null>('export_archive_library');
     if (path) notice.value = '备份已导出：' + path;
   } catch(e) { error.value = '导出失败：' + e; }
@@ -116,6 +144,12 @@ watch(searchQuery, () => {
 });
 watch(sortBy, () => void loadPage(true));
 watch(filterValues, () => void loadPage(true), { deep: true });
+watch(() => selectFields.value.map(field => field.id).join(','), () => {
+  const ids = new Set(selectFields.value.map(field => field.id));
+  const retained = Object.fromEntries(Object.entries(filterValues.value).filter(([id]) => ids.has(id)));
+  if (Object.keys(retained).length !== Object.keys(filterValues.value).length) filterValues.value = retained;
+  else if (active) void loadPage(true);
+});
 function goToPage(next: number) {
   if (next < 1 || next > totalPages.value || next === page.value) return;
   page.value = next;
@@ -132,18 +166,21 @@ async function migrateKnownDirectories() {
   } catch(e) { migrationWarning.value = '旧目录设置读取失败，可手动导入 JSON：' + e; }
 }
 onActivated(async () => {
+  active = true;
   loading.value = true;
   await (migration ??= migrateKnownDirectories());
+  if (!active) return;
   await loadPage();
 });
 onDeactivated(() => {
+  active = false;
   loadToken++;
   if (searchTimer) clearTimeout(searchTimer);
 });
 </script>
 
 <template>
-  <div class="page-content">
+  <div class="page-content" @focusout="onEditorFocusOut">
     <!-- 标题栏 -->
     <div class="library-header">
       <h2 class="library-title">📚 压缩包管理</h2>
@@ -224,6 +261,10 @@ onDeactivated(() => {
       <span class="error-icon">⚠️</span>
       <span>{{ error }}</span>
     </div>
+    <div v-if="saveError" class="error-box glass-card" role="alert">
+      <span>{{ saveError }}</span>
+      <button class="btn-glass" :disabled="saving > 0" @click="retryFailedWrites">重试保存</button>
+    </div>
 
     <!-- 空状态 -->
     <div v-if="!loading && !error && stats.total === 0" class="empty-box glass-card">
@@ -256,7 +297,7 @@ onDeactivated(() => {
 
     <!-- 无搜索结果 -->
     <div
-      v-if="!loading && stats.total > 0 && matchingTotal === 0"
+      v-if="!loading && !error && stats.total > 0 && matchingTotal === 0"
       class="empty-box glass-card"
     >
       <div class="empty-icon">🔍</div>

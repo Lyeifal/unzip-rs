@@ -26,6 +26,10 @@ const ratioColor = computed(() => {
   const ratio = parseFloat(props.mapping.compression_ratio);
   return ratio <= 60 ? 'var(--success)' : ratio <= 80 ? 'var(--warning)' : 'var(--error)';
 });
+const ratioWidth = computed(() => {
+  const ratio = parseFloat(props.mapping.compression_ratio);
+  return `${Number.isFinite(ratio) ? Math.max(0, Math.min(100, ratio)) : 0}%`;
+});
 </script>
 
 <template>
@@ -37,7 +41,7 @@ const ratioColor = computed(() => {
     <div class="card-title" :title="mapping.source_name">
       {{ mapping.source_name }}
     </div>
-    <div class="card-archive">{{ mapping.archive_name }}</div>
+    <div class="card-archive" :title="mapping.archive_name">{{ mapping.archive_name }}</div>
     <div v-if="mapping.output_dir" class="card-archive" :title="mapping.output_dir">{{ mapping.output_dir }}</div>
     <details v-if="mapping.output_hashes?.length" class="hash-details">
       <summary>SHA-256 · {{ mapping.output_hashes.length }} 个文件</summary>
@@ -96,7 +100,7 @@ const ratioColor = computed(() => {
         <div
           class="ratio-fill"
           :style="{
-            width: mapping.compression_ratio,
+            width: ratioWidth,
             background: ratioColor,
           }"
         ></div>

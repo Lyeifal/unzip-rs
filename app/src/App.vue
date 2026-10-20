@@ -62,6 +62,11 @@ function drainShellRequests() {
 
 // 主题设置面板
 const showSettings = ref(false);
+const settingsSection = ref('updates');
+function openSettings(section = 'updates') {
+  settingsSection.value = section;
+  showSettings.value = true;
+}
 const currentWindow = getCurrentWindow();
 const isMaximized = ref(false);
 const windowActionError = ref("");
@@ -128,13 +133,13 @@ onUnmounted(() => {
       </h1>
       <div class="header-drag-region" data-tauri-drag-region></div>
       <div class="header-actions">
-        <button v-if="updater.available.value" class="update-indicator btn-glass" @click="showSettings = true">发现新版 {{ updater.available.value.version }}</button>
+        <button v-if="updater.available.value" class="update-indicator btn-glass" @click="openSettings()">发现新版 {{ updater.available.value.version }}</button>
         <span v-if="windowActionError" class="window-action-error" role="status">{{ windowActionError }}</span>
         <button
           class="settings-btn"
           title="应用设置"
           aria-label="应用设置"
-          @click="showSettings = !showSettings"
+          @click="showSettings ? (showSettings = false) : openSettings()"
         >
           <span>⚙</span>
         </button>
@@ -181,11 +186,11 @@ onUnmounted(() => {
     <KeepAlive>
       <UnpackView v-if="tab === 'unpack'" />
       <PackView v-else-if="tab === 'pack'" />
-      <LibraryView v-else-if="tab === 'library'" @open-settings="showSettings = true" />
+      <LibraryView v-else-if="tab === 'library'" @open-settings="openSettings('library')" />
     </KeepAlive>
 
     <!-- 主题设置面板 -->
-    <ThemeSettings v-if="showSettings" @close="showSettings = false" />
+    <ThemeSettings v-if="showSettings" :initial-section="settingsSection" @close="showSettings = false" />
   </div>
 </template>
 

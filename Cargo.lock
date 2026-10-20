@@ -1002,7 +1002,7 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "unzip-cli"
-version = "0.1.26101901"
+version = "0.1.26102001"
 dependencies = [
  "clap",
  "unzip-core",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "unzip-core"
-version = "0.1.26101901"
+version = "0.1.26102001"
 dependencies = [
  "memchr",
  "rand",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "unzip-mcp"
-version = "0.1.26101901"
+version = "0.1.26102001"
 dependencies = [
  "clap",
  "rmcp",

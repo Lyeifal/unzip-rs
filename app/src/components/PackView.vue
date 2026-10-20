@@ -5,8 +5,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import StyledSelect from "./StyledSelect.vue";
 import TaskActivity from './TaskActivity.vue';
 import type { SelectOption } from "../types/select";
-import { useShellQueue } from '../composables/useShellQueue';
+import { useShellQueue, appendUniquePaths } from '../composables/useShellQueue';
 import { waitForToolPathsSave } from '../composables/useToolPaths';
+import { useTaskLog } from '../composables/useTaskLog';
 import {
   defaultPackOptions,
   fmtSize,
@@ -14,8 +15,6 @@ import {
   savePackOptions,
   type PackSummaryPayload,
 } from "../types";
-
-const LEVELS = ["ok", "error", "warn", "skip", "info"] as const;
 
 const formatOptions: SelectOption[] = [
   { value: "7z", label: "7z（推荐：AES-256 + 文件名加密）" },
@@ -31,7 +30,7 @@ const compressionLevelOptions: SelectOption[] = [
 ];
 
 const opts = reactive(defaultPackOptions());
-const { packPaths: items, quickPackRequests, quickActive } = useShellQueue();
+const { packPaths: items, quickPackRequests, quickActive, directActive } = useShellQueue();
 const itemSel = ref(-1);
 const running = ref(false);
 const starting = ref(false);
@@ -39,11 +38,11 @@ const quickRun = ref(false);
 let shellReady = false;
 let quickTimer: ReturnType<typeof setTimeout> | undefined;
 function scheduleQuickPack() {
-  if (!shellReady || running.value || starting.value || !quickPackRequests.value.length || quickTimer) return;
+  if (!shellReady || running.value || starting.value || directActive.value || !quickPackRequests.value.length || quickTimer) return;
   quickTimer = setTimeout(() => { quickTimer = undefined; void startQuickPack(); }, 300);
 }
 async function startQuickPack() {
-  if (!shellReady || running.value || starting.value) return;
+  if (!shellReady || running.value || starting.value || directActive.value) return;
   const paths = quickPackRequests.value.shift();
   if (!paths) return;
   const previous = { summary: summary.value, done: done.value, total: total.value, current: current.value };
@@ -64,8 +63,7 @@ async function startQuickPack() {
     void invoke('finish_shell_requests', { reveal: true }).catch(() => {});
   } finally { starting.value = false; scheduleQuickPack(); }
 }
-const logs = ref<{ msg: string; level: string }[]>([]);
-const logBox = ref<HTMLElement | null>(null);
+const { logs, logBox, appendLog } = useTaskLog();
 const done = ref(0);
 const total = ref(0);
 const current = ref("");
@@ -139,23 +137,11 @@ function schedulePreview() {
 watch(() => [opts.name_prefix, opts.name_suffix, opts.prefix_enabled,
   opts.suffix_enabled, opts.number_start, opts.name_step, opts.auto_number, opts.format, items.value.length], schedulePreview, { immediate: true });
 
-// ---------- 日志 ----------
-
-function appendLog(msg: string, level: string = "info") {
-  logs.value.push({ msg, level: LEVELS.includes(level as (typeof LEVELS)[number]) ? level : "info" });
-  nextTick(() => {
-    const el = logBox.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-}
-
 // ---------- 待打包列表 ----------
 
 async function addFiles() {
   const picked = await invoke<string[]>("pick_files", { current: "" });
-  for (const p of picked) {
-    if (!items.value.includes(p)) items.value.push(p);
-  }
+  items.value = appendUniquePaths(items.value, picked);
 }
 
 async function addDir() {
@@ -163,9 +149,7 @@ async function addDir() {
   const last = items.value[items.value.length - 1];
   const startDir = last ? last.replace(/[/\\][^/\\]*$/, "") : "";
   const picked = await invoke<string[]>("pick_directories_multi", { current: startDir });
-  for (const p of picked) {
-    if (!items.value.includes(p)) items.value.push(p);
-  }
+  items.value = appendUniquePaths(items.value, picked);
 }
 
 function removeItem() {
@@ -201,7 +185,7 @@ async function browseOutDir() {
 // ---------- 运行控制 ----------
 
 async function start() {
-  if (running.value || starting.value) return;
+  if (running.value || starting.value || directActive.value) return;
   quickRun.value = false;
   if (!items.value.length) {
     appendLog("[警告] 请先添加要打包的文件或目录", "warn");
@@ -283,6 +267,7 @@ async function copyPassword(text: string, idx: number) {
 
 // ---------- 生命周期 ----------
 watch(() => quickPackRequests.value.map(paths => paths.length).join(','), scheduleQuickPack);
+watch(directActive, scheduleQuickPack);
 watch(() => running.value || starting.value, (active) => { quickActive.value = active; scheduleQuickPack(); }, { flush: 'sync' });
 
 onMounted(async () => {
@@ -321,7 +306,9 @@ onUnmounted(() => {
     <h1 class="title">打包压缩</h1>
     <TaskActivity :running="running" :current="current" :done="done" :total="total" kind="压缩" />
     <p v-if="quickPackRequests.length" class="hint" role="status">右键快捷压缩等待中（{{ quickPackRequests.length }} 批），当前任务结束后自动开始。</p>
+    <p v-if="directActive" class="hint" role="status">解压任务进行中，完成后可开始打包。</p>
 
+    <fieldset class="pack-options" :disabled="running || starting">
     <!-- 待打包列表 -->
     <section class="glass-card section-card">
       <div class="section-title">待打包列表（每个条目单独打一个包，按顺序命名）</div>
@@ -464,8 +451,9 @@ onUnmounted(() => {
     </section>
 
     <!-- 运行 -->
+    </fieldset>
     <div class="row run-row">
-      <button class="btn-glass btn-primary" :disabled="running || starting" @click="start">开始打包</button>
+      <button class="btn-glass btn-primary" :disabled="running || starting || directActive" @click="start">开始打包</button>
       <button class="btn-glass btn-danger" :disabled="!running" @click="stop">停止</button>
       <span class="current">{{ current }}</span>
     </div>
@@ -528,6 +516,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.pack-options { display: flex; flex-direction: column; gap: 14px; min-width: 0; border: 0; padding: 0; margin: 0; }
 .toggle-label { display: inline-flex; align-items: center; gap: 7px; color: var(--text-primary); }
 .affix-input { flex: 1 1 180px; min-width: 150px; }
 .number-start-input { width: 120px; max-width: 100%; }
