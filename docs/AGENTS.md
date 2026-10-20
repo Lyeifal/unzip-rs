@@ -1,15 +1,18 @@
 # unzip-rs（Rust + Tauri 版）
 
+维护说明同步日期：2026-10-20，对应 `v0.1.26102001`（Pre-release）。版本记录见 [CHANGELOG.md](../CHANGELOG.md)，本轮审查见 [REVIEW_2026-10-20.md](../REVIEW_2026-10-20.md)。
+
 自动解压 + 打包压缩工具（早期仅用脚本快速验证过原型，现行为以本文档与代码为准）。核心能力：魔数识别伪装包、散卷归集、改名卷领养、密码库策略、lz4 含 legacy 链式解码、apk 产物落位、按外层目录分组，捆绑应急解压层；扩展能力：多形体/垃圾前缀/复合包识别与雕出（封面图+rar、完整 mp4 后追加 zip/分卷、大媒体尾部追加档带结构校验）、SFX 自解压包识别（PE overlay 判定，与游戏启动 exe 区分）、数字卷名尾标与夸克分段容忍、同名嵌套目录折叠、同 stem 双格式去重、内层解包用密码库、内层档藏子目录两层内自动解、内层档同名目录冲突自动化解（暂存位）。
 
 ## 结构
 
-当前用户文档入口见 [README.md](./README.md)，集中记录与 JSON 兼容格式见 [PACK_MAPPING.md](./PACK_MAPPING.md)，保存位置与 SQLite 迁移见 [STORAGE.md](./STORAGE.md)。当前正式记录采用 SQLite；历史测试数量不能作为新阶段的验证结果。
+项目主说明见 [README.md](../README.md)，文档导航见 [docs/README.md](./README.md)，集中记录与 JSON 兼容格式见 [PACK_MAPPING.md](./PACK_MAPPING.md)，保存位置与 SQLite 迁移见 [STORAGE.md](./STORAGE.md)。当前正式记录采用 SQLite；历史测试数量不能作为新阶段的验证结果。
 
 记录模块 `archive_hash` 负责流式 SHA-256，`archive_catalog` 负责 SQLite 记录、旧 JSON 迁移、元数据合并和密码索引；它们与 `pack`、`pipeline` 共享同一份记录，不依赖 GUI。
 
 - `crates/unzip-core` — 纯逻辑库（无 UI 依赖）；模块：config / sniff / scan / extract / assemble / pipeline / lz4mini / types / pack（打包压缩）。关键新增函数：`sniff::embedded_kind`（嵌入识别）/`embedded_offset`（雕出偏移）/`embedded_tail_offset`（尾部窗+结构校验）、`sniff::sniff_sfx`（SFX 自解压包判定）、`sniff::match_num_vol_tail`（卷名尾标与夸克形态）、`pipeline::carve_to_temp`（复合包雕出）、`pipeline::collapse_same_name_dir`（同名折叠）、`pipeline::collect_level`/`run_level`（解包作业归组/执行，UNWRAP_WALK_MAX=2 浅扫子目录、`.unwrap_` 暂存位化解同名冲突）、`pipeline::dedup_key`（同 stem 去重）、`assemble::concat_volumes`（夸克分段拼接兜底）。
 - `crates/unzip-cli` — 命令行（含 --dry-run）
+- `crates/unzip-mcp` — 独立 stdio MCP 服务；`integrations/` 提供集成包构建和接入说明。每进程一个任务槽，不与桌面进程互锁；共享记录由 SQLite 协调。
 - `app/` — Tauri v2 + Vue 3 桌面应用（独立 cargo 工程，`src-tauri/Cargo.toml` 带空 `[workspace]` 与根 workspace 隔离）
 - `assets/bundled/` — 应急层：7z.exe+7z.dll（7-Zip 26.03, LGPL）、UnRAR.exe（RARLAB, 仅解压许可）、License.txt、NOTICE.txt
 
@@ -50,6 +53,7 @@
 ## 关键约定
 
 - **config 位置**：CLI 默认 exe 旁 `config.json`；Tauri 启动时设 `UNZIP_CONFIG_PATH` 指向应用数据目录（`%APPDATA%\unzip-rs\config.json`）。
+- **config 错误语义**：GUI 配置加载和任务入口、CLI 启动使用 `load_config_from_checked`；缺文件才默认，损坏／不可读报错并保留文件。`update_config_to` 严格读取最新磁盘配置，失败时不执行更新闭包。旧 `load_config_from` 仍为默认回退兼容接口，不用于新增任务入口；MCP 已有独立严格读取。测试：`partial_update_preserves_invalid_or_unreadable_config`。
 - **名称与迁移**：产品名/默认安装目录为 `unzip-rs`；`appDirectoriesOverride` 将配置与记录定向到 `%APPDATA%\unzip-rs`，WebView 到 `%LOCALAPPDATA%\unzip-rs\webview`。窗口 `create=false`，setup 完成 `storage::migrate_directory` 后再创建窗口，避免 WebView 提前生成目标文件遮蔽旧偏好。迁移先完整复制到临时目录，再原子发布；旧文件保留，新目录非空时不合并旧文件，SQLite 必须包含 WAL 快照。`installer-hooks.nsh` 在产品改名时识别并卸载旧程序文件，保留用户数据。单实例标识及更新公钥不变。标题栏 `titlebarBackground` 默认 false，图标可用 `python app/scripts/make_icon.py` 生成透明底源图后用 Tauri icon 生成各平台尺寸。
 - **共用工具设置**：`ToolPathsSettings.vue` 位于应用设置中，显式保存 `seven_zip/unrar/lz4`，调用 `save_tool_paths` 校验并只合并这三项；解压页不再编辑工具路径。任务启动等待进行中的路径保存，两种任务均从配置文件读取最新工具。解压页 `save_config` 只保存其余配置，保留已保存的共用路径；返回 false 时不得继续启动任务。配置写入和合并由 core `update_config_to` 在同进程 writer mutex 内串行完成，自动密码置顶只合并密码，不用旧任务配置覆盖新设置。测试锚点：`password_promotion_preserves_settings_saved_after_task_started`、`simultaneous_config_updates_do_not_lose_changes_or_share_temp_writes`、Tauri `tool_settings::tests`、`app/tests/tool-path-settings.mjs`。
 - **捆绑工具回退链**：用户配置的外部 7z/UnRAR 路径优先；不存在时用 `UNZIP_BUNDLED_DIR`（或 exe 旁 `bundled/`）里的内置组件。lz4 解码内置 Rust 实现（`lz4mini`）优先，外部 lz4.exe 仅回退。
@@ -89,14 +93,17 @@
 - 资源管理器快捷压缩入口 `run_quick_pack`：每个选中项在其父目录创建一个包，文件使用 stem（`文件.txt` → `文件.7z`），文件夹保留完整名称。`Config.quick_pack_format` 默认 `7z`，设置可选 `zip`，`set_quick_pack_format` 校验后只合并该字段；`save_unpack_config` 保留磁盘最新值，避免旧快照覆盖。快捷压缩独立构造选项，`password_mode=none`、不混入 txt、不分卷，沿用集中记录和撞名避让，不修改常规打包表单或 localStorage 偏好。测试：core `quick_pack_*`、Tauri `quick_pack_format_defaults_validates_and_survives_stale_unpack_save`、`app/tests/shell-integration.mjs`。
 - 加密：7z 格式 `-p密码 -mhe=on`（连文件名一起加密），zip 格式 `-p密码 -mem=AES256`；密码模式 random_per_pack / random_uniform / manual，随机密码 16 位字母数字（剔除 0/O、1/I/l 易混淆字符）。
 - 分卷：源内容总大小（压缩后不可预知）> 阈值（默认 3G）→ `-v{大小}g`（默认 2g）。**单文件分卷优化**：启用分卷参数但压缩后只产生一个文件时，自动重命名去除 `.001` 后缀（Test001.7z.001 → Test001.7z），避免假分卷误导。
-- 混淆 txt：输入先硬链接镜像（`link_or_copy`，不占磁盘）到 temp 暂存目录，混入 `资源说明.txt`（模板替换 `{date}` + 8 位随机 hex），cd 进暂存目录打包 `.`——txt 落在压缩包根，同批每包内容唯一 → hash 必然不同（防网盘按 hash 比对），下载者解压可见来源与日期。
+- 混淆 txt：`stage_input` 通过 `stage_file` 优先硬链接镜像，失败则独占创建并复制、同步，传播遍历和暂存错误。`write_mix_txt` 独占创建 `资源说明.txt`（替换 `{date}` 并追加 8 位随机 hex），遇已有文件或目录改用 `资源说明 (2).txt` 等名称，绝不能截断可能关联源文件的硬链接。cd 进暂存目录打包 `.`，说明位于包根；随机内容用于降低相同内容打包后的哈希重复，不承诺数学上的唯一性。
+- 打包文件保护：`unique_pack_name` 按大小写不敏感名称索引已有单文件包和任意数字分卷，首卷缺失也必须避让。先在输出目录的 `.unzip-pack-output-*` 私有目录压缩，要求 7z 返回码 0；码 1 表示有文件跳过，不能当完整成功。只收集数字分卷并按数字排序（`.999` 后为 `.1000`）。最终通过 `stage_file` 独占发布，冲突时报错，尝试清理本次已创建文件；多个分卷发布不是一次原子事务。测试：`mixed_text_never_modifies_a_same_named_source_file_or_directory`、`staging_errors_are_reported_without_replacing_existing_files`、`output_names_avoid_existing_volumes_and_collection_is_numeric`、`real_pack_keeps_source_description_and_old_volume_intact`、Windows `unreadable_source_cannot_produce_success_or_leave_partial_outputs`。
 - **集中映射记录**（`archive_catalog`）：每个条目打包后立即 upsert 到 `%APPDATA%\unzip-rs\pack_mapping.sqlite3`（CLI 可用 `UNZIP_CATALOG_PATH` 指定旧 JSON 路径及数据库基名，GUI 启动时指定 AppData 路径）；`record_id` 基于压缩文件绝对路径，同名不同目录不合并。首次使用时在事务中导入旧 JSON 并保留原文件；无效 JSON 不得用空数据库遮蔽。元数据命令只修改指定条目，不接受前端整文件快照覆盖。集中保存失败时，`write_mapping_json` 仅作为输出目录恢复副本兜底并告警。
 - **压缩内容哈希**（`archive_hash`）：单文件分卷完成改名后，逐产物流式计算 SHA-256，`output_hashes` 保存每个文件的 file_name / size_bytes / sha256。按块检查取消，不读取整个大文件入内存；哈希失败或取消仍保留产物与密码记录，并提示哈希不完整。
 - **哈希密码策略**：`Config.hash_match` 默认 true。`HashPasswords` 从集中记录按大小和 SHA-256 建索引，只有大小有候选时才读文件，包内同一路径缓存结果。优先密码同时用于预组装和正式解包，后接规则/密码库/运行时密码；无效记录或未命中不妨碍原流程。分卷仅以首卷查找密码，不能视为整组完整性验证。关闭或 dry-run 不读输入哈希，产物不比对。
 - CLI 无子命令时仍是解压；`pack` 为子命令（目录恰好叫 pack 时会被优先当子命令解析，已知小歧义）。
 - 取消在包间及哈希读取块之间检查 `should_cancel`，不杀 7z 子进程。已完成的压缩产物会保留；哈希取消导致记录不完整时须告警。
 - GUI：`App.vue` 为 Tab 壳（KeepAlive 三页状态互不丢），解压页 `components/UnpackView.vue`、打包页 `components/PackView.vue`、管理页 `components/LibraryView.vue`；公共样式入口是 `styles/themes.css`、`styles/glassmorphism.css` 和 `styles/animations.css`。Tauri 事件解压 `uz-*`、打包 `pack-*`（前缀隔离不串扰）。
+- 后台任务：手动压缩、解压、密码重试和右键直接入口共用 `spawn_archive_task`／`complete_archive_work`／`BusyGuard`。线程创建失败释放占用，工作 panic 转为对应失败事件；必须先释放 busy 再发送完成事件，防止下一任务误判。前端 `directActive`／`quickActive` 同步两页手动及队列运行状态，运行期间冻结压缩参数和文件列表。两页日志统一使用 `useTaskLog`，最近 5000 行、每 tick 合并滚动，尊重用户向上阅读。测试：`worker_completion_and_panic_release_busy_before_returning_ui_payload`、`app/tests/shell-integration.mjs`。
 - 更新：`useAppUpdater.ts` 在发布构建启动后检查 GitHub 稳定版，只提示；`UpdateSettings.vue` 提供手动检查及下载安装。`begin_update_install` 与压缩/解压共用 busy，安装失败时只释放更新自身占用。正式构建合并 `tauri.release.conf.json` 生成签名；`prepare-release.mjs` 生成 Windows x64 清单，`verify_update` 使用 minisign 验证包及签名版本，工作流创建 Release 草稿。密钥位于仓库外，禁止提交私钥或任意替换现有公钥；详见 [UPDATES.md](./UPDATES.md)。
+- 发布：同步根工作区、桌面、前端及锁文件版本，推送相同版本标签。流水线产出安装包、`.sig`、`latest.json` 和 MCP zip 草稿；当前沿用 Pre-release，发布时 `prerelease=true`、`make_latest="false"`。不能把预发布附件中的 `latest.json` 误认为稳定更新通道已启用。
 
 ## 通用压缩包管理与资源管理器入口
 
@@ -105,6 +112,8 @@
 - `LibraryView.vue` 直接展示集中打包记录，`GameCard.vue` 为保留旧文件名的通用卡片。备注与 `metadata.custom_fields` 保存在集中 SQLite 数据库，字段定义及密码可见性由 `useLibraryFields.ts` 存在本机 localStorage。密码默认隐藏，隐藏时不得将明文放入 DOM 或 title；该设置不加密数据库或 JSON 导出。旧 `version` 只在 `schema_version < 1` 时并入备注，引擎/APK 标记迁入稳定字段 ID，原始属性保留；移除定义不删除字段值。
 - 管理页使用 `query_archive_library` 从 SQLite 加载 24 条一页的记录，数据库负责搜索、字段筛选、排序、匹配计数与全库统计；切换页码或条件时旧请求结果不得覆盖新请求。JSON 备份仍走完整 `load`/`export`，不受分页截断。
 - 字段类型为文本、下拉、勾选。字段 ID 不随名称改变；保存队列捕获条目 ID 和元数据快照，只调用 `update_archive_metadata`。旧目录 JSON 自动尝试导入已知的管理/打包目录，也提供手动导入和备份导出；同路径已有集中记录优先，原文件不修改。切回管理页会刷新集中记录。
+- 编辑一致性：查询结果叠加 `pendingMetadata`，保存完成后等编辑框失焦再刷新；失败快照保留在 `failedWrites` 并提供重试，普通加载不能清除保存错误或失败草稿。草稿仅在会话内保留，有失败项不得导出。字段定义移除时清理失效筛选，页面停用后不做后台刷新。测试：`app/tests/archive-library-pagination.mjs`。
+- 下拉与弹窗：`StyledSelect` 传送至 body，定位为 fixed，滚动时重定位，菜单层级高于设置弹窗；键盘选择保持选项可见，禁用 fieldset 中不可打开。Escape 先关闭菜单，设置弹窗处理未被消费的 Escape；弹窗限制 Tab 焦点、恢复关闭前焦点并锁背景滚动。“管理字段”进入 library 设置，更新提示进入 updates。相关回归同上。
 - Windows 右键菜单由 `shell_integration.rs` 按用户设置写入 HKCU `Software\Classes\*\shell\UnzipRs` / `Directory\shell\UnzipRs`，`MUIVerb=unzip-rs`、空 `SubCommands` 与内部 `shell` 构成二级菜单。启停只清理本应用新键和旧 `UnzipRs.Pack` / `UnzipRs.Unpack`。五个入口：`--shell-extract-here` / `--shell-extract-folder` 直接解压，`--shell-pack-same-name` 直接快捷压缩，`--shell-unpack` / `--shell-pack` 仅加入列表。直接 exe + 引号参数，不经 cmd/PowerShell。单实例转发与冷启动队列交给 App.vue 分发，UnpackView / PackView 注册事件后自动运行；忙时保留排队，停止清空相应页面待执行直接任务。传统 `MultiSelectModel=Player` 最多 100 项，Win11 通常在“显示更多选项”。
 - `start_shell_run` 从磁盘读取已保存 Config，共用密码策略、hash 匹配、failed_dir_enabled 与 busy 互斥，不保存临时源/输出目录。核心 `run_with_layout` 保留默认 Grouped 流程，Here / NamedFolder 在每个包的父目录内暂存，复用完整解压及递归流程，成功后 `sibling_output` 原子预留不重名目录/文件，拒绝覆盖与符号链接；落位异常保留剩余暂存内容并告警。直接模式按实际父路径区分同名包。`PendingRetry` 保留原始输出布局与目录，失败包移入 failed 后重试也回原始目标，且只尝试新密码。测试：`explorer_*`、`sibling_output::tests`、注册表临时键迁移测试、`app/tests/shell-integration.mjs`。
 - `start_run` 的可选 `files` 非空时仅用指定文件/目录作为源根，空数组报错；未传时保留源目录扫描。核心 `scan_sources` 对显式文件只扫描所选文件，不枚举父目录；同目录选中文件合入同一两遍扫描组。显式文件可位于输出目录内，重复根只处理一次。测试锚点：`explicit_files_do_not_scan_unselected_neighbors_and_use_parent_root`、`explicit_main_rar_and_companion_are_grouped_in_both_orders`。

@@ -1,5 +1,7 @@
 # unzip-rs（Rust + Tauri）
 
+当前预发布版本：**v0.1.26102001**（2026-10-20）。从 [GitHub 发布页](https://github.com/Lyeifal/unzip-rs/releases/tag/v0.1.26102001) 下载 Windows x64 安装包或 MCP 集成包；预发布版本需要手动下载安装，不进入稳定版自动更新通道。版本变化见 [更新日志](CHANGELOG.md)，完整文档见 [文档导航](docs/README.md)。
+
 Windows 桌面工具，解决三个下载党日常痛点：
 
 1. **带密码的压缩包不用到处翻密码**。平时把常用密码存进密码库（发布页看到的随手加进去），下载完成后一键解压——工具自动按密码库逐个尝试，命中的还会置顶记忆，下次更快。再也不用在「文件提供者发布页 → 聊天记录 → 便签」之间来回找密码。
@@ -8,7 +10,7 @@ Windows 桌面工具，解决三个下载党日常痛点：
    - 查看所有压缩包的统计信息（大小、压缩率、分卷数）
    - 编辑多行备注，在应用设置中添加文本、下拉选项和勾选字段，自定义分类或整理状态
    - SQLite 分页浏览、实时搜索和筛选，按名称/大小/压缩率/日期排序
-   - 自动保存元数据（含备份），整理游戏、文档、图片、软件等各类打包记录
+   - 按条目自动保存元数据，保存失败可重试，支持导出完整记录备份
 
 技术上是个 Rust 核心库（`unzip-core`，纯逻辑无 UI）+ 命令行（`unzip-cli`）+ Tauri v2 + Vue 3 桌面应用。核心能力是**按内容魔数识别文件**，所以发布组各种伪装手法都能认出来直接解。
 
@@ -52,17 +54,26 @@ Windows 桌面工具，解决三个下载党日常痛点：
 
 ### 应用更新
 
-应用启动时检查 GitHub 稳定版，发现新版本后可在“应用设置 → 应用更新”下载并安装，也支持手动检查。压缩或解压进行中不能安装更新。发布需要配置签名密钥，工作流会生成带安装包、签名和 `latest.json` 的 Release 草稿；完整配置及发布步骤见 [更新与发布](docs/UPDATES.md)。
+应用启动时检查 GitHub 稳定版，发现新版本后可在“应用设置 → 应用更新”下载并安装，也支持手动检查。此检查不包含 Pre-release；当前预发布版需从发布页手动下载。压缩或解压进行中不能安装更新。发布需要配置签名密钥，工作流会生成带安装包、签名、`latest.json` 和 MCP 集成包的 Release 草稿；预发布及稳定版发布步骤见 [更新与发布](docs/UPDATES.md)。
 
 ### 自定义管理字段
 
 点击标题栏齿轮或压缩包管理页的“管理字段”，即可添加、重命名、排序和移除字段。下拉字段的选项每行填写一个；字段定义和密码显示开关保存在当前电脑，条目的备注和字段值保存在 AppData 专用目录的集中记录中。移除字段或选项不会删除已有值，旧选项仍能显示和筛选。
 
+旧版版本号会并入备注，引擎和 APK 标记会迁移为可配置字段，原始属性也会保留。加载旧文件时先在界面中转换，编辑保存后写入新结构。
+
+编辑会按顺序保存，完成后在离开编辑框时刷新记录，避免打断下一项输入。保存失败会保留本次会话的草稿，并显示“重试保存”；刷新或切换页面不会丢弃这些草稿。关闭应用前应完成重试，存在未保存失败项时无法导出备份。
+
 ### 打包命名
 
 打包页统一使用“前缀＋数字＋后缀”命名，可以分别启用前缀和后缀，选择已有项或添加新项；关闭某一项后，该部分不参与命名及自动续号匹配。中间填写纯数字起点和递增步长，例如前缀 `G`、起点 `001`、后缀 `_正式版`、步长 `2`，得到 `G001_正式版`、`G003_正式版`。开启“自动续号”后，应用跨输出目录读取压缩包管理中的 `.7z`、`.zip`、`.rar` 记录（含分卷首卷），只匹配前后缀完全相同且中间为纯数字的包名，并从“已匹配最大序号＋步长”和手填起点中较大者开始。预览会更新，真正打包前会重新计算。旧桌面配置会转换为前缀和数字起点；CLI 的 `--name` 仍保持原行为。
 
-旧版版本号会并入备注，引擎和 APK 标记会迁移为可配置字段，原始属性也会保留。加载旧文件时先在界面中转换，编辑保存后写入新结构。
+### 打包文件保护
+
+- 已有单文件压缩包或任意数字分卷都会占用对应名称，打包自动使用 ` (2)` 等后缀避让，不覆盖旧包。
+- 混入的 `资源说明.txt` 使用独占创建；源文件或目录同名时改为 `资源说明 (2).txt` 等名称，原有内容保留。
+- 压缩先在输出目录内的私有暂存目录完成，7z 返回码为 0 后才发布产物；源文件无法读取或 7z 返回警告也会报告失败，避免把缺文件的包当成完整结果。
+- 多个分卷逐个发布，发布失败会尝试清理本次已创建的文件；这一过程不等同于多个文件一次性原子提交。取消会等待当前外部工具调用返回，已完成的产物保留。
 
 ### 压缩记录、哈希与密码
 
@@ -97,7 +108,9 @@ Windows 桌面工具，解决三个下载党日常痛点：
 unzip-rs/
 ├── crates/
 │   ├── unzip-core/      # 核心库：解压 pipeline + 打包 pack 模块（纯逻辑，无 UI 依赖）
-│   └── unzip-cli/       # 命令行（解压 + pack 子命令）
+│   ├── unzip-cli/       # 命令行（解压 + pack 子命令）
+│   └── unzip-mcp/       # stdio MCP 服务
+├── integrations/       # MCP 集成包构建、客户端配置示例与配套 skill
 ├── app/                 # Tauri 桌面应用（Vue 3 前端在 app/src，Rust 外壳在 app/src-tauri）
 │   ├── src/
 │   │   ├── components/  #   UnpackView.vue（解压页）、PackView.vue（打包页）、
@@ -115,6 +128,7 @@ unzip-rs/
     ├── PACK_MAPPING.md  # 集中记录、哈希密码匹配与导入导出
     ├── STORAGE.md       # 数据位置、备份范围与 SQLite 迁移
     ├── IMPLEMENTATION_SUMMARY.md  # 模块职责与检查范围
+    ├── UPDATES.md       # 签名、预发布与稳定版发布流程
     ├── UI_REDESIGN.md   # 当前界面与设置使用说明
     └── examples/
         └── pack_mapping_example.json  # 通用压缩记录示例数据
@@ -140,14 +154,14 @@ npm run tauri dev
 
 ```powershell
 cd app
-sync-bundled.bat          # 必跑：同步 assets\bundled → 打包资源（7z/UnRAR 应急组件）
+.\sync-bundled.bat        # 必跑：同步 assets\bundled → 打包资源（7z/UnRAR 应急组件）
 npm run tauri build
 ```
 
 产物：
 
 ```
-app\src-tauri\target\release\bundle\nsis\unzip-rs_0.1.26101801_x64-setup.exe   ← 安装包（当前用户权限，双击即装）
+app\src-tauri\target\release\bundle\nsis\unzip-rs_0.1.26102001_x64-setup.exe   ← 安装包（当前用户权限，双击即装）
 app\src-tauri\target\release\unzip-app.exe                                   ← 便携版主程序
 app\src-tauri\target\release\resources\                                      ← 便携版必须与 exe 同目录拷贝
 ```
@@ -182,12 +196,16 @@ exe 在 `target\release\unzip-cli.exe`，可单独拷走；旁边放 `config.jso
 
 ## 测试
 
+2026-10-20 审查阶段通过 194 项 Rust 测试（核心 173、MCP 7、桌面端 14）和 6 组浏览器回归；前端构建及 `tsc --noEmit` 通过。浏览器回归模拟 Tauri IPC，不代表真实安装、升级或资源管理器全流程验证。详细范围见 [审查记录](REVIEW_2026-10-20.md)。
+
 ```powershell
-cargo test --workspace    # 109 个用例；用到真实 7z/UnRAR/lz4/7z.sfx 的集成用例在工具缺失时自动跳过
-cargo test --manifest-path app/src-tauri/Cargo.toml  # 桌面工具设置及右键入口测试
+cargo test --workspace --locked
+cargo test --manifest-path app/src-tauri/Cargo.toml --locked
 ```
 
-工具设置的前端回归脚本为 `node app/tests/tool-path-settings.mjs`，需要 Playwright 和 Edge；可用 `PLAYWRIGHT_MODULE` 环境变量指定已有 Playwright 安装的 `index.mjs` 文件 URL。脚本自行启停临时服务和浏览器，使用模拟配置，不修改个人设置。
+涉及真实 7z/UnRAR/lz4/7z.sfx 的集成用例在所需工具缺失时可能跳过对应检查，不能只凭通过数量判断外部工具覆盖情况。
+
+浏览器回归需要 Playwright 和 Edge，可用 `PLAYWRIGHT_MODULE` 指定已有 Playwright 安装的 `index.mjs` 绝对路径或文件 URL。脚本自行启停临时服务和浏览器，使用模拟配置。6 组脚本的命令与覆盖范围见 [实现摘要](docs/IMPLEMENTATION_SUMMARY.md#检查记录与限制)。
 
 ## 常见问题
 
@@ -205,12 +223,17 @@ taskkill /F /IM unzip-app.exe
 
 压缩包记录、备注和各分卷哈希集中保存在同目录的 `pack_mapping.sqlite3`。旧 `pack_mapping.json` 在首次迁移后保留；管理页提供旧记录导入和 JSON 备份导出。
 
+**提示“配置文件无效”或“无法读取配置文件”？**
+
+GUI 任务入口和 CLI 不会把损坏或不可读的既有配置替换为默认值。先退出应用、备份报错路径中的 `config.json`，修复 JSON 或恢复有效备份；若文件被占用或无读取权限，先处理相应问题再重试。只有配置文件不存在时才使用默认配置，详见 [配置读取与恢复](docs/STORAGE.md#配置读取与恢复)。
+
 **改了 Rust 核心后用 GUI 测试没变化？或直接 cargo 编的 GUI exe 打开白屏/「无法访问此页面」？**
 GUI 是独立 cargo 工程（`app/src-tauri`），且前端资源由 **tauri CLI** 在构建时嵌入——裸 `cargo build --release` 编出的 exe **不嵌前端**，必须走 tauri 构建：
 ```powershell
 cd app
 npx tauri build --no-bundle                    # 快速：只出 exe（app\src-tauri\target\release\unzip-app.exe）
-sync-bundled.bat && npm run tauri build        # 完整：exe + NSIS 安装包
+.\sync-bundled.bat
+npm run tauri build                          # 完整：exe + NSIS 安装包
 ```
 便携版 exe 需与 `resources\` 目录同拷（内置 7z/UnRAR 应急组件）。
 

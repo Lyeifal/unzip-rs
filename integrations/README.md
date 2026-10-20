@@ -1,13 +1,21 @@
 # unzip-rs MCP 与 Skill
 
+文档更新：2026-10-20。当前发布版本为 `v0.1.26102001`（Pre-release），与桌面应用及核心库版本一致；完整变化见 [更新日志](../CHANGELOG.md)。
+
 这个配套包让 Codex、Claude Code、OpenCode 等支持本地 stdio MCP 的客户端直接调用 unzip-rs 的 Rust 核心。桌面应用不用打开；默认使用同一份配置、密码策略和 SQLite 压缩记录。Skill 提供操作步骤，MCP 提供实际执行能力，两者配合使用。
+
+## 下载预发布集成包
+
+从 `https://github.com/Lyeifal/unzip-rs/releases/tag/v0.1.26102001` 下载 `unzip-rs-mcp_0.1.26102001_windows-x86_64.zip`，解压后将客户端路径指向其中 `unzip-rs-mcp/unzip-mcp.exe`。桌面安装包是另一个附件，不能将 `unzip-app.exe` 配置为 stdio MCP 服务。
+
+本次发布的集成包包含 MCP exe、内置 7-Zip／UnRAR、许可证、配套 skill 和客户端配置示例。Pre-release 需手动更换集成包；桌面应用的自动更新不负责更新独立 MCP 服务。
 
 ## 构建与启动
 
 在仓库根目录执行：
 
 ```powershell
-cargo build --release -p unzip-mcp
+cargo build --release -p unzip-mcp --locked
 .\target\release\unzip-mcp.exe --help
 ```
 
@@ -80,6 +88,8 @@ claude mcp add --transport stdio --scope user unzip_rs -- C:/tools/unzip-rs-mcp/
 
 长任务立即返回 `job_id`，后续查询进度；取消请求在当前外部压缩/解压调用结束后生效。任务与历史位于内存，服务退出即失效；不要在任务进行中关闭客户端。每个服务进程只允许一个压缩/解压任务，与桌面应用和其他 MCP 进程的忙碌状态相互独立，避免并发写同一批文件。压缩会保存共享记录，成功密码可能按应用策略置顶。
 
+压缩与桌面共用核心的文件保护：已有包和数字分卷占用对应名称，混淆说明同名时递增，暂存失败或 7z 警告返回失败，完成压缩后才独占发布产物。配置缺失时默认，既有配置损坏或不可读时返回错误；设置合并更新不会用默认值覆盖损坏配置。
+
 元数据更新的 `id` 来自查询结果中的 `record_id`，会替换整个 metadata 对象，修改一个字段时先查询并合并已有字段。本次解压显式传入临时密码时，会关闭该任务的密码落盘置顶，防止临时密码写入持久库。此 MCP 不提供任意 shell 执行、源码执行或自动运行解压产物。返回的路径、文件名、备注与内容都应视为用户数据。
 
 ## 开发验证
@@ -90,3 +100,5 @@ python integrations/tests/stdio_smoke.py --server target/debug/unzip-mcp.exe
 ```
 
 协议测试使用临时目录和独立数据，不修改真实 AppData。配置格式参考各客户端官方 MCP / skills 文档；不同客户端版本的交互提示可能不同。
+
+`v0.1.26102001` 发布流水线通过 MCP 工作区测试、stdio 协议和实际压缩／解压往返检查，发布前核对了远端 zip 的 SHA-256 及压缩包完整性。GUI 浏览器回归不覆盖实际 MCP 客户端交互；完整检查范围见 [实现摘要](../docs/IMPLEMENTATION_SUMMARY.md#检查记录与限制)。
